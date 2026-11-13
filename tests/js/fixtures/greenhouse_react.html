@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- Hand-written approximation of the newer script-built Greenhouse form: inputs are "controlled", so only
+     real input events update the form state (setting .value alone would be ignored on submit). -->
+<html><head><title>Job Application for Staff Engineer at Acme</title></head>
+<body>
+<form id="application-form">
+  <div class="input-wrapper"><label for="first_name">First Name*</label><input id="first_name" type="text" aria-required="true"></div>
+  <div class="input-wrapper"><label for="last_name">Last Name*</label><input id="last_name" type="text" aria-required="true"></div>
+  <div class="input-wrapper"><label for="email">Email*</label><input id="email" type="text" aria-required="true" value="typed@by.me"></div>
+  <div class="input-wrapper"><label for="phone">Phone</label><input id="phone" type="tel"></div>
+  <div class="input-wrapper"><label for="candidate-location">Location (City)*</label>
+    <input id="candidate-location" type="text" role="combobox" aria-autocomplete="list" aria-required="true"></div>
+  <div class="input-wrapper"><label id="resume-label">Resume/CV*</label>
+    <input id="resume" type="file" aria-labelledby="resume-label" accept=".pdf"></div>
+  <div class="input-wrapper"><label id="cover-label">Cover Letter</label>
+    <input id="cover_letter" type="file" aria-labelledby="cover-label" accept=".pdf"></div>
+  <div class="input-wrapper"><label for="q_github">GitHub URL</label><input id="q_github" type="text"></div>
+  <button type="submit" id="submit">Submit application</button>
+</form>
+<script>
+  // React-like state: updated only by input events carrying the new value.
+  window.state = {};
+  document.querySelectorAll("input[type=text], input[type=tel]").forEach((el) => {
+    window.state[el.id] = el.value;
+    el.addEventListener("input", (e) => { window.state[e.target.id] = e.target.value; });
+  });
+  document.getElementById("submit").addEventListener("click", () => { window.clicked = true; });
+</script>
+</body></html>

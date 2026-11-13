@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Application Studio</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="24" height="24">
+    <h1>Add job to Application Studio</h1>
+    <button id="gear" class="icon" title="Connection settings" aria-label="Connection settings">&#9881;</button>
+  </header>
+
+  <section id="setup" hidden>
+    <p class="hint">Paste the token from <b>Application Studio &rarr; Settings &rarr; Browser extension</b>.</p>
+    <label for="server">Server address <span class="muted">(leave as is for the app on this computer)</span></label>
+    <input id="server" type="text" placeholder="http://127.0.0.1:47821" spellcheck="false">
+    <label for="token">Token</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button id="save-setup" class="primary">Save</button>
+      <button id="cancel-setup" class="ghost">Cancel</button>
+    </div>
+  </section>
+
+  <main id="form" hidden>
+    <div id="banner" class="banner" hidden></div>
+
+    <label for="url">Job link <span id="url-note" class="muted"></span></label>
+    <input id="url" type="url" spellcheck="false">
+
+    <div class="two">
+      <div>
+        <label for="company">Company</label>
+        <input id="company" type="text">
+      </div>
+      <div>
+        <label for="role">Role</label>
+        <input id="role" type="text">
+      </div>
+    </div>
+
+    <label for="salary">Salary <span class="muted">(optional)</span></label>
+    <input id="salary" type="text" placeholder="e.g. $120K - $150K/yr" spellcheck="false">
+
+    <label for="description">Job description <span id="count" class="muted"></span></label>
+    <textarea id="description" rows="10" spellcheck="false"></textarea>
+    <p class="hint"><span id="method"></span> <button id="copy-debug" class="linklike" type="button">Copy detection details</button></p>
+
+    <div class="row">
+      <button id="add" class="primary" disabled>Add to queue</button>
+      <button id="cancel" class="ghost">Cancel</button>
+    </div>
+  </main>
+
+  <main id="apply" hidden>
+    <p class="hint">Fills the form from this job's documents and your saved profile. It never submits &mdash; you review and press Submit yourself.</p>
+    <div id="apply-banner" class="banner" hidden></div>
+
+    <div id="apply-pick" hidden>
+      <label for="apply-job">Which job is this form for?</label>
+      <select id="apply-job"></select>
+    </div>
+
+    <div class="row">
+      <button id="apply-fill" class="primary">Fill this form</button>
+      <button id="apply-close" class="ghost">Close</button>
+    </div>
+
+    <div id="apply-report" hidden>
+      <h2 id="apply-filled-h">Filled</h2><ul id="apply-filled"></ul>
+      <h2 id="apply-files-h">Attached</h2><ul id="apply-files"></ul>
+      <h2 id="apply-needs-h">Needs you</h2><ul id="apply-needs"></ul>
+      <h2 id="apply-skipped-h">Left for you (self-identification)</h2><ul id="apply-skipped"></ul>
+    </div>
+
+    <div id="apply-done" class="banner warn" hidden>
+      <b>Submitted it?</b>
+      After you press Submit on the site, mark it here so the tracker stays accurate.
+      <div class="row"><button id="apply-submitted">I submitted it</button></div>
+    </div>
+
+    <p class="hint"><button id="apply-add-instead" class="linklike" type="button">Add this job to the queue instead</button></p>
+  </main>
+
+  <p id="status" class="status" hidden></p>
+  <script src="apply.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

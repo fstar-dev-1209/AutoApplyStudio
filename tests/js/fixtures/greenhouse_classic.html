@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- Hand-written approximation of a classic Greenhouse application form (not a saved copy of a live page). -->
+<html><head><title>Job Application for Senior Engineer at Acme</title></head>
+<body>
+<form id="application_form" action="https://boards.greenhouse.io/acme/jobs/1/applications" method="post">
+  <div class="field"><label for="first_name">First Name <span>*</span></label>
+    <input id="first_name" name="job_application[first_name]" type="text" required></div>
+  <div class="field"><label for="last_name">Last Name <span>*</span></label>
+    <input id="last_name" name="job_application[last_name]" type="text" required></div>
+  <div class="field"><label for="email">Email <span>*</span></label>
+    <input id="email" name="job_application[email]" type="text" required></div>
+  <div class="field"><label for="phone">Phone</label>
+    <input id="phone" name="job_application[phone]" type="text"></div>
+
+  <div id="resume_fieldset" data-field="resume" class="field">
+    <label>Resume/CV <span>*</span></label>
+    <input id="resume" type="file" name="job_application[resume]" accept=".pdf,.doc,.docx,.txt,.rtf" required>
+  </div>
+  <div id="cover_letter_fieldset" data-field="cover_letter" class="field">
+    <label>Cover Letter</label>
+    <input id="cover_letter" type="file" name="job_application[cover_letter]" accept=".pdf,.doc,.docx,.txt,.rtf">
+  </div>
+
+  <div class="field"><label for="question_1">LinkedIn Profile</label>
+    <input id="question_1" name="job_application[answers][1]" type="text"></div>
+  <div class="field"><label for="question_2">Website</label>
+    <input id="question_2" name="job_application[answers][2]" type="text"></div>
+
+  <div class="field"><label for="question_3">Are you legally authorized to work in the United States? *</label>
+    <select id="question_3" name="job_application[answers][3]" required>
+      <option value="">Please select</option><option value="1">Yes</option><option value="0">No</option>
+    </select></div>
+
+  <fieldset class="field"><legend>Will you now or in the future require visa sponsorship? *</legend>
+    <label><input type="radio" name="sponsor" value="1"> Yes</label>
+    <label><input type="radio" name="sponsor" value="0"> No</label>
+  </fieldset>
+
+  <div class="field"><label for="question_5">Why do you want to work at Acme? *</label>
+    <textarea id="question_5" name="job_application[answers][5]" required></textarea></div>
+
+  <div class="field"><label for="gender">Gender</label>
+    <select id="gender" name="job_application[gender]"><option value="">Please select</option><option>Male</option><option>Female</option></select></div>
+
+  <input type="submit" id="submit_app" value="Submit Application">
+</form>
+<script>
+  window.submitted = false;
+  document.getElementById("application_form").addEventListener("submit", (e) => { e.preventDefault(); window.submitted = true; });
+  document.getElementById("submit_app").addEventListener("click", () => { window.clicked = true; });
+</script>
+</body></html>

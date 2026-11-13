@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+release/
+*.spec.bak
+.auto-apply-studio/
+.ruff_cache/
+_read_*.py
+*.db
+*.db-wal
+*.db-shm
+credentials.dat
