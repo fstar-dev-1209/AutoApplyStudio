@@ -130,3 +130,23 @@ def test_answers_are_counted_without_the_marker_names_in_the_question():
     assert count_marked_answers(prompt) == 0
     page = prompt + "\n[[ANSWER_START]]First[[ANSWER_END]]\n" + prompt + "\n[[ANSWER_START]]\nE) 9\n[[ANSWER_END]]"
     assert count_marked_answers(page) == 2
+
+
+def test_work_history_goes_into_the_resume_prompt_and_foreign_employers_are_rejected():
+    import pytest
+    from core.prompt_builder import build_claude_chat_prompt
+    from core.resume_finalize import ResumeError, employers_outside_history, finalize_resume_object
+    from core.settings_store import AppSettings, ProfileSettings
+
+    history = "Senior Engineer | Acme Corp | Austin, TX | Jan 2021 - Present"
+    s = AppSettings(profile=ProfileSettings(work_history=history))
+    assert history in build_claude_chat_prompt(s, job_description="Build things.")
+    assert history not in build_claude_chat_prompt(AppSettings(), job_description="Build things.")
+
+    ok = {"experience": [{"company": "ACME Corp.", "title": "Senior Engineer"}]}
+    bad = {"experience": [{"company": "Acme Corp"}, {"company": "KPMG"}]}
+    assert employers_outside_history(ok, history) == []
+    assert employers_outside_history(bad, history) == ["KPMG"]
+    assert employers_outside_history(bad, "") == []  # no history set: nothing to compare with
+    with pytest.raises(ResumeError, match="not a truthful resume"):
+        finalize_resume_object(dict(bad, name="x"), s)

@@ -55,6 +55,8 @@ C_COMPANY, C_ROLE, C_DOCS, C_APPLIED, C_STAGE, C_RESP, C_ACT, C_NEXT, C_DUE, C_A
 COL_WIDTHS = {C_COMPANY: 240, C_DOCS: 80, C_APPLIED: 110, C_STAGE: 140, C_RESP: 124, C_ACT: 90, C_NEXT: 190,
               C_DUE: 90, C_ACTIONS: 112}
 ROW_HEIGHT = 54
+SLICE_FROM = 40  # a list longer than this is drawn in slices of SLICE rows
+SLICE = 15
 HIDE_ORDER = (C_DOCS, C_DUE, C_ACT, C_NEXT)  # dropped first when the pane is narrow
 
 CHIPS = [("all", "All"), ("not_applied", "Not applied"), ("applied", "Applied"), ("recruiter_contact", "Recruiter"),
@@ -94,6 +96,7 @@ class ApplicationsView(QWidget):
         self._sort = "activity"
         self._desc = True
         self._rows: list[AppRow] = []
+        self._build = 0
         self._chip_buttons: dict[str, QPushButton] = {}
         self._suspend = False
         self._dirty = True
@@ -326,8 +329,8 @@ class ApplicationsView(QWidget):
         return ids[0] if ids else ""
 
     def select_job(self, job_id: str) -> None:
-        for r in range(self.table.rowCount()):
-            if self.table.item(r, C_COMPANY).data(Qt.ItemDataRole.UserRole) == job_id:
+        for r, row in enumerate(self._rows):  # by the list, so a row still being drawn can be found
+            if row.job.id == job_id and r < self.table.rowCount():
                 self.table.selectRow(r)
                 self.open_requested.emit(job_id)
                 return
@@ -416,19 +419,55 @@ class ApplicationsView(QWidget):
         keep = set(self.selected_ids())
         now = utc_now()
         bar = self.table.verticalScrollBar().value()
+        self._build += 1  # a newer refresh makes any slices still waiting from the last one stop
+        build = self._build
         self.table.setUpdatesEnabled(False)
         blocker = QSignalBlocker(self.table)
         self.table.setRowCount(0)
         self.table.setRowCount(len(rows))
         self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
-        for i, row in enumerate(rows):
-            self._fill_row(i, row, now)
+        # A long list is drawn a few rows at a time, so the window keeps answering: every row carries several
+        # widgets, and on a slow machine drawing them all at once froze the window long enough for Windows to close it.
+        first = len(rows) if len(rows) <= SLICE_FROM else SLICE
+        for i in range(first):
+            self._fill_row(i, rows[i], now)
         blocker.unblock()
         self.table.setUpdatesEnabled(True)
+        if first < len(rows):
+            QTimer.singleShot(0, lambda: self._draw_slice(build, first, now, keep, bar))
+        else:
+            self._restore_view(rows, keep, bar)
+        self._after_rows(rows, flt)
+
+    def release_rows(self) -> None:
+        """Drop every row widget (before an app-wide restyle, which would otherwise visit each of them)."""
+        self._build += 1
+        self._dirty = True
+        self.table.setRowCount(0)
+
+    def _draw_slice(self, build: int, start: int, now, keep: set, bar: int) -> None:
+        if build != self._build:
+            return
+        rows = self._rows
+        end = min(start + SLICE, len(rows))
+        self.table.setUpdatesEnabled(False)
+        blocker = QSignalBlocker(self.table)
+        for i in range(start, end):
+            self._fill_row(i, rows[i], now)
+        blocker.unblock()
+        self.table.setUpdatesEnabled(True)
+        if end < len(rows):
+            QTimer.singleShot(0, lambda: self._draw_slice(build, end, now, keep, bar))
+        else:
+            self._restore_view(rows, keep, bar)
+
+    def _restore_view(self, rows: list, keep: set, bar: int) -> None:
         for i, row in enumerate(rows):
             if row.job.id in keep:
                 self.table.selectRow(i)
         self.table.verticalScrollBar().setValue(bar)
+
+    def _after_rows(self, rows: list, flt) -> None:
         self.table.horizontalHeader().setSortIndicator(
             next((i for i, c in enumerate(COLUMNS) if c[1] == self._sort), -1),
             Qt.SortOrder.DescendingOrder if self._desc else Qt.SortOrder.AscendingOrder)
@@ -607,7 +646,10 @@ class ApplicationsView(QWidget):
         item = self.table.itemAt(pos)
         if item is None:
             return
-        job_id = self.table.item(item.row(), C_COMPANY).data(Qt.ItemDataRole.UserRole)
+        company = self.table.item(item.row(), C_COMPANY)
+        if company is None:  # the row is still being drawn
+            return
+        job_id = company.data(Qt.ItemDataRole.UserRole)
         self._build_more_menu(job_id).exec(self.table.viewport().mapToGlobal(pos))
 
     def _applied_on(self, job_id: str) -> None:

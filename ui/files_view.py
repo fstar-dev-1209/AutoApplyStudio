@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -29,6 +29,8 @@ from ui.widgets import copy_button, ghost_button, muted_label, page_title, prima
 
 FILE_ICONS = {"resume": "doc", "pdf": "pdf", "cover": "note"}
 COL_NAME, COL_GENERATED, COL_RESUME, COL_PDF, COL_COVER, COL_ACTIONS = range(6)
+SLICE_FROM = 40  # a list longer than this is drawn in slices of SLICE rows
+SLICE = 15
 
 
 class GeneratedFilesView(QWidget):
@@ -38,6 +40,7 @@ class GeneratedFilesView(QWidget):
         super().__init__(parent)
         self.setObjectName("ContentPane")
         self._root = output_root or Path.home() / "Remote"
+        self._tree_build = 0
         self.db = db
 
         layout = QVBoxLayout(self)
@@ -162,11 +165,12 @@ class GeneratedFilesView(QWidget):
     def set_database(self, db: ApplicationDatabase) -> None:
         self.db = db
 
-    def set_output_root(self, root: Path) -> None:
+    def set_output_root(self, root: Path, *, refresh: bool = True) -> None:
         self._root = root
         self.path_label.setText(str(root))
         self.disk.set_root(root)
-        self.refresh()
+        if refresh:  # a page that is not on screen redraws when it is opened
+            self.refresh()
 
     def focus_search(self) -> None:
         self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -203,7 +207,41 @@ class GeneratedFilesView(QWidget):
         total_files = missing = 0
         kind = self.kind_combo.currentData()
         entries: list[FileEntry] = []
-        groups: dict[str, QTreeWidgetItem] = {}
+        for job in jobs:
+            refs = file_refs(job)
+            entries += [FileEntry(job, r) for r in refs if r.path and (not kind or r.kind == kind)]
+            for ref in refs[:3]:
+                total_files += bool(ref.path)
+                missing += bool(ref.path) and not ref.exists
+        # The tracked-files tree has several buttons on every row, which is slow to draw; it is built only while it is
+        # the view on screen, and in slices, so the window keeps answering (a frozen window gets closed by Windows).
+        self._tree_build += 1
+        if self.stack.currentIndex() == 1:
+            first = len(jobs) if len(jobs) <= SLICE_FROM else SLICE
+            groups: dict[str, QTreeWidgetItem] = {}
+            self._add_tree_rows(jobs[:first], groups)
+            if first < len(jobs):
+                build = self._tree_build
+                QTimer.singleShot(0, lambda: self._tree_slice(build, jobs, first, groups))
+        has = bool(jobs)
+        self.tree.setVisible(has)
+        self.empty.setVisible(not has)
+        self.empty_title.setText("No matching documents" if q else "No documents yet")
+        self._view_jobs = jobs
+        self.gallery.set_entries(entries)
+        self.gallery.setVisible(bool(entries))
+        self.gallery_empty.setVisible(not entries)
+        self.gallery_empty_title.setText("No matching documents" if q or kind else "No documents yet")
+        note = ""
+        if missing:
+            can = sum(1 for j in jobs if self._restorable(j))
+            note = f" · {missing} file(s) missing on disk" + (
+                f". Use Sync to disk to restore {can} job(s) from the database" if can else
+                " (no stored resume data to rebuild them from)")
+        self.count_label.setText(f"{len(jobs)} job(s), {total_files} file(s){note}")
+        self._update_sync_button()
+
+    def _add_tree_rows(self, jobs: list, groups: dict) -> None:
         for job in jobs:
             parent = self.tree.invisibleRootItem()
             if self.group_box.isChecked():
@@ -223,31 +261,23 @@ class GeneratedFilesView(QWidget):
             item.setToolTip(COL_NAME, str(output_folder(job) or ""))
             item.setData(COL_NAME, Qt.ItemDataRole.UserRole, job.id)
             parent.addChild(item) if parent is not self.tree.invisibleRootItem() else self.tree.addTopLevelItem(item)
-            refs = file_refs(job)
-            entries += [FileEntry(job, r) for r in refs if r.path and (not kind or r.kind == kind)]
-            for ref, col in zip(refs, (COL_RESUME, COL_PDF, COL_COVER)):
-                total_files += bool(ref.path)
-                missing += bool(ref.path) and not ref.exists
+            for ref, col in zip(file_refs(job), (COL_RESUME, COL_PDF, COL_COVER)):
                 self.tree.setItemWidget(item, col, self._file_button(ref))
             self.tree.setItemWidget(item, COL_ACTIONS, self._actions(job))
         self.tree.expandAll()
-        has = bool(jobs)
-        self.tree.setVisible(has)
-        self.empty.setVisible(not has)
-        self.empty_title.setText("No matching documents" if q else "No documents yet")
-        self._view_jobs = jobs
-        self.gallery.set_entries(entries)
-        self.gallery.setVisible(bool(entries))
-        self.gallery_empty.setVisible(not entries)
-        self.gallery_empty_title.setText("No matching documents" if q or kind else "No documents yet")
-        note = ""
-        if missing:
-            can = sum(1 for j in jobs if self._restorable(j))
-            note = f" · {missing} file(s) missing on disk" + (
-                f". Use Sync to disk to restore {can} job(s) from the database" if can else
-                " (no stored resume data to rebuild them from)")
-        self.count_label.setText(f"{len(jobs)} job(s), {total_files} file(s){note}")
-        self._update_sync_button()
+
+    def release_rows(self) -> None:
+        """Drop the tree's row widgets (before an app-wide restyle, which would otherwise visit each of them)."""
+        self._tree_build += 1
+        self.tree.clear()
+
+    def _tree_slice(self, build: int, jobs: list, start: int, groups: dict) -> None:
+        if build != self._tree_build or self.stack.currentIndex() != 1:
+            return
+        end = min(start + SLICE, len(jobs))
+        self._add_tree_rows(jobs[start:end], groups)
+        if end < len(jobs):
+            QTimer.singleShot(0, lambda: self._tree_slice(build, jobs, end, groups))
 
     # -------------------------------------------------------------------- sync
 

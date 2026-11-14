@@ -42,7 +42,7 @@ EventCallback = Callable[[str, dict], None]
 
 def _reply_rejected(exc: BaseException) -> bool:
     """True when the chat did reply but the reply was read and thrown away (a template, no work experience)."""
-    return "not a finished resume" in str(exc)
+    return "not a finished resume" in str(exc) or "not a truthful resume" in str(exc)
 
 
 class QueueEngine:

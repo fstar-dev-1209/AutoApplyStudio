@@ -16,6 +16,23 @@ def has_experience(resume_obj: dict[str, Any] | None) -> bool:
     return isinstance(experience, list) and any(isinstance(e, dict) and any(e.values()) for e in experience)
 
 
+def _squash(text: str) -> str:
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum())
+
+
+def employers_outside_history(resume_obj: dict[str, Any] | None, work_history: str) -> list[str]:
+    """Employers the resume lists that the candidate's own work history does not name ([] when no history is set)."""
+    known = _squash(work_history)
+    if not known:
+        return []
+    out: list[str] = []
+    for entry in (resume_obj or {}).get("experience") or []:
+        name = str(entry.get("company") or "").strip() if isinstance(entry, dict) else ""
+        if name and _squash(name) not in known:
+            out.append(name)
+    return out
+
+
 def finalize_resume_object(
     resume_obj: dict[str, Any],
     settings: AppSettings,
@@ -34,6 +51,11 @@ def finalize_resume_object(
         raise ResumeError(
             "The reply has no work experience, so it is not a finished resume (the chat's answer was cut short or "
             "left it out). It was not used; it will be generated again.")
+    invented = employers_outside_history(resume_obj, profile.work_history)
+    if invented:
+        raise ResumeError(
+            f"The reply lists an employer that is not in your work history ({', '.join(invented)}), so it is not a "
+            "truthful resume. It was not used; it will be generated again.")
     if company and not str(resume_obj.get("company_name") or "").strip():
         resume_obj["company_name"] = company
     if role_title and not str(resume_obj.get("role_title") or "").strip():

@@ -42,6 +42,7 @@ def test_a_job_found_on_jobright_ends_up_applied_to_and_recorded(tmp_path):
     settings = AppSettings(
         apply_mode="auto", discovery_enabled=True,
         profile=ProfileSettings(name="Mary Ann van der Berg", email="mary@example.com", phone="(555) 010-0000",
+                                work_history="Engineer | PayPal | 2019 - 2024",
                                 location="Austin, TX", linkedin_url="https://linkedin.com/in/mary",
                                 work_authorization="Yes", needs_sponsorship="No"),
         apply_facts={"city": "Austin", "state": "TX", "referral_source": "LinkedIn", "agree_consents": "Yes"})
@@ -76,7 +77,8 @@ def test_a_job_found_on_jobright_ends_up_applied_to_and_recorded(tmp_path):
             f.write_bytes(b"x")
         job.generated_files = [str(f) for f in files]
         job.job_description = "Build RAG systems."
-        job.resume_json = {"cover_letter": "Dear team", "company_name": "Acme"}
+        job.resume_json = {"cover_letter": "Dear team", "company_name": "Acme",
+                       "experience": [{"company": "PayPal", "title": "Engineer"}]}
         job.chat_url = "https://claude.ai/chat/aaaaaaaa-2222-3333-4444-555555555555"
         job.completed_at = datetime.now(timezone.utc).isoformat()
         job.set_status(JobStatus.DONE, "Completed")

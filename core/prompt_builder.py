@@ -57,6 +57,12 @@ def build_claude_chat_prompt(
     """
     template = (settings.prompt_template or "").strip() or "Return valid resume JSON only."
     jd = job_description.strip()
+    history = (settings.profile.work_history or "").strip()
+    if history:  # the real jobs: the chat may reword the bullets but never add, drop or change an employer or date
+        template = (f"{template}\n\nCANDIDATE WORK HISTORY (fixed facts, taken from the candidate). The \"experience\" "
+                    f"list must contain exactly these employers, with these titles and dates. Do not add, remove or "
+                    f"rename any employer, and do not change any date. You may reword the bullets to fit the job.\n"
+                    f"{history}")
     if not jd:
         return template
     return f"{template}\n\n{jd}"

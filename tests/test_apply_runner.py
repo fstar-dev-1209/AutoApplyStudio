@@ -44,7 +44,7 @@ class Env:
         self.store = QueueStore(tmp_path / "studio.db")
         self.apps = ApplicationService(self.store.database)
         self.settings = AppSettings(apply_mode="auto", apply_daily_cap=40,
-                                    profile=ProfileSettings(name="Mary Ann Berg"))
+                                    profile=ProfileSettings(name="Mary Ann Berg", work_history="Engineer | PayPal | 2019 - 2024"))
         self.now = T0
         self.calls: list[dict] = []
         self.outcomes: list = []
@@ -361,3 +361,18 @@ def test_has_experience_needs_at_least_one_real_job():
     assert not has_experience({"experience": []})
     assert not has_experience({"experience": [{}]})
     assert not has_experience({})
+
+
+def test_auto_apply_waits_until_the_real_work_history_is_set(env):
+    job = env.job(1)
+    env.settings.profile.work_history = ""
+    assert "work history" in env.runner.eligible(env.store.get(job.id), env.settings)
+    env.settings.apply_mode = "dry_run"  # a dry run sends nothing, so it may go ahead
+    assert "work history" not in env.runner.eligible(env.store.get(job.id), env.settings)
+
+
+def test_a_resume_naming_an_employer_outside_the_work_history_is_never_sent(env):
+    job = env.job(2)
+    job.resume_json = {"cover_letter": "Dear team", "experience": [{"company": "KPMG", "title": "Analyst"}]}
+    env.store.update(job)
+    assert "not in your work history" in env.runner.eligible(env.store.get(job.id), env.settings)

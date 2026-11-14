@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from core import ats
-from core.resume_finalize import has_experience
+from core.resume_finalize import employers_outside_history, has_experience
 from core.apply_answers import make_answer_fn
 from core.apply_facts import DEFAULTS, answered_form_questions, merge_form_questions
 from core.applications import ApplicationService
@@ -275,6 +275,10 @@ class ApplyRunner:
             return "No resume file on disk"
         if job.resume_json and not has_experience(job.resume_json):
             return "The resume has no work experience; generate it again"
+        if s.apply_mode == "auto" and not (s.profile.work_history or "").strip():
+            return "Add your real work history in Settings before auto-applying"
+        if job.resume_json and employers_outside_history(job.resume_json, s.profile.work_history):
+            return "The resume names an employer that is not in your work history; generate it again"
         history = self.attempts.for_job(job.id) if history is None else history
         if any(a["state"] in {"submitted", "expired", "dismissed"} for a in history):
             return "Already handled"

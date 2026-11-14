@@ -65,6 +65,9 @@ class ProfileSettings:
     education_location: str = "Gainesville, FL"
     education_degree: str = "B.S. Computer Science"
     education_dates: str = ""
+    # The real jobs, as plain text. Sent with every resume request as fixed facts; a resume naming any other employer
+    # is rejected. Blank = not set (Auto mode will not apply until it is filled in).
+    work_history: str = ""
     # Used only to fill employer application forms (job apply assist). Blank means "leave the field empty".
     linkedin_url: str = ""
     github_url: str = ""
@@ -199,6 +202,7 @@ class AppSettings:
                 profile_raw.get("education_degree") or ProfileSettings.education_degree
             ),
             education_dates=str(profile_raw.get("education_dates") or ""),
+            work_history=str(profile_raw.get("work_history") or ""),
             linkedin_url=str(profile_raw.get("linkedin_url") or ""),
             github_url=str(profile_raw.get("github_url") or ""),
             website_url=str(profile_raw.get("website_url") or ""),

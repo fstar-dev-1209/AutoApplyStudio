@@ -271,6 +271,7 @@ def test_files_library_shows_files_and_existence(window, tmp_path):
     window.queue_store.update(job)
     window._navigate("files")
     fv = window.files_view
+    fv._mode(1)  # the tracked-files tree is drawn only while it is the view on screen
     fv.search.setText("echo")
     assert fv.tree.topLevelItemCount() == 1
     child = fv.tree.topLevelItem(0).child(0)
@@ -470,6 +471,7 @@ def test_archive_and_restore_from_the_applications_screen(window, qtbot):
 
 
 def test_add_manual_application_tracks_without_generating_or_applying(window):
+    window._navigate("applications")
     n = window.apps_page.view.table.rowCount()
     job_id = window.apps.add_manual("Zeta Corp", "Platform Engineer", url="https://zeta.example/jobs/1")
     job = window.queue_store.get(job_id)
@@ -802,3 +804,37 @@ def test_auto_start_never_overrides_a_pause_or_missing_sign_in(window):
     window.settings_store.settings.intake_auto_start = False
     assert window._maybe_auto_start() is False  # setting off
     assert not started
+
+
+def test_a_long_applications_list_is_drawn_in_slices_and_ends_complete(window, qtbot, monkeypatch):
+    import ui.applications_view as av
+
+    monkeypatch.setattr(av, "SLICE_FROM", 3)
+    monkeypatch.setattr(av, "SLICE", 2)
+    window._navigate("applications")
+    view = window.apps_page.view
+    view.refresh()
+    assert view.table.rowCount() == 7
+    assert view.table.item(0, C_COMPANY) is not None  # the first slice is there at once
+    assert view.table.item(6, C_COMPANY) is None  # the rest is still being drawn
+    assert view.selected_ids() == []  # nothing breaks while rows are missing
+    view.refresh()  # a newer refresh replaces the unfinished one
+    qtbot.waitUntil(lambda: all(view.table.item(r, C_COMPANY) for r in range(7)), timeout=5000)
+    assert row_of(view, "Echo") >= 0
+    assert view.table.cellWidget(6, C_ACTIONS) is not None
+
+
+def test_saving_settings_restyles_and_redraws_only_when_the_look_changed(window, monkeypatch):
+    import ui.main_window as mw
+
+    calls = []
+    real = mw.apply_theme
+    monkeypatch.setattr(mw, "apply_theme", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    window._apply_theme()  # first call after startup values are known
+    calls.clear()
+    window._on_settings_saved()
+    window._on_settings_saved()
+    assert calls == []  # same theme and density: nothing to restyle
+    window.settings_store.settings.density = "compact" if window.settings_store.settings.density != "compact" else "comfortable"
+    window._on_settings_saved()
+    assert calls == [1]

@@ -255,6 +255,17 @@ class SettingsView(QWidget):
         for label, w in ((C.SETTINGS_EDU_SCHOOL, self.edu_school), (C.SETTINGS_EDU_LOCATION, self.edu_location),
                          (C.SETTINGS_EDU_DEGREE, self.edu_degree), (C.SETTINGS_EDU_DATES, self.edu_dates)):
             lay.addLayout(self._row(label, w))
+        history_title = QLabel("Work history")
+        history_title.setObjectName("SectionTitle")
+        lay.addSpacing(6)
+        lay.addWidget(history_title)
+        self.work_history = QPlainTextEdit()
+        self.work_history.setMinimumHeight(150)
+        self.work_history.setPlaceholderText(
+            "Your real jobs, newest first, one block each. Resumes are written from exactly this, and any resume that "
+            "names another employer is rejected. Auto-apply stays off until this is filled in.\n\n"
+            "Senior Engineer | Acme Corp | Austin, TX | Jan 2021 - Present\n- what you did there")
+        lay.addWidget(self.work_history)
         self.linkedin, self.github, self.website, self.work_auth, self.sponsorship = (QLineEdit() for _ in range(5))
         self.work_auth.setPlaceholderText(C.SETTINGS_WORK_AUTH_PH)
         self.sponsorship.setPlaceholderText(C.SETTINGS_SPONSORSHIP_PH)
@@ -269,7 +280,7 @@ class SettingsView(QWidget):
         lay.addStretch(1)
         self._groups["profile"] = [self.name, self.email, self.phone, self.location,
                                    self.edu_school, self.edu_location, self.edu_degree, self.edu_dates,
-                                   self.linkedin, self.github, self.website, self.work_auth, self.sponsorship]
+                                   self.work_history, self.linkedin, self.github, self.website, self.work_auth, self.sponsorship]
         lay.itemAt(0).layout().addWidget(self._eye("profile", "personal information"))
         return card
 
@@ -636,7 +647,7 @@ class SettingsView(QWidget):
         for w, v in ((self.name, p.name), (self.email, p.email), (self.phone, p.phone), (self.location, p.location),
                      (self.edu_school, p.education_school), (self.edu_location, p.education_location),
                      (self.edu_degree, p.education_degree), (self.edu_dates, p.education_dates),
-                     (self.linkedin, p.linkedin_url), (self.github, p.github_url), (self.website, p.website_url),
+                     (self.work_history, p.work_history), (self.linkedin, p.linkedin_url), (self.github, p.github_url), (self.website, p.website_url),
                      (self.work_auth, p.work_authorization), (self.sponsorship, p.needs_sponsorship),
                      (self.prompt, s.prompt_template)):
             self._real[w] = v
@@ -766,6 +777,7 @@ class SettingsView(QWidget):
         s.profile.education_location = self._value(self.edu_location).strip()
         s.profile.education_degree = self._value(self.edu_degree).strip()
         s.profile.education_dates = self._value(self.edu_dates).strip()
+        s.profile.work_history = self._value(self.work_history).strip()
         s.profile.linkedin_url = self._value(self.linkedin).strip()
         s.profile.github_url = self._value(self.github).strip()
         s.profile.website_url = self._value(self.website).strip()

@@ -451,17 +451,35 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         s = self.settings_store.settings
         colors = resolve_theme(s.theme, app)
-        if app:
-            apply_theme(app, colors, s.density)
-        refresh_icons()
+        # Restyling the whole app and redrawing every table is slow (tens of seconds on a small server, long enough
+        # for Windows to close a frozen window), so it is done only when the look really changed, and only for the
+        # page on screen; the others redraw when they are opened.
+        look = (colors.app_bg, colors.accent, s.density)
+        changed = look != getattr(self, "_look", None)
+        self._look = look
+        if changed:
+            if hasattr(self, "apps_page"):  # the app-wide restyle visits every widget alive; these are redrawn below
+                self.apps_page.view.release_rows()
+                self.files_view.release_rows()
+                # Qt only queues the dropped widgets for deletion; until that runs the restyle still visits them all
+                from PySide6.QtCore import QCoreApplication, QEvent
+
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            if app:
+                apply_theme(app, colors, s.density)
+            refresh_icons()
         self._tint_titlebar()
         self.queue_view.set_theme_light(colors.is_light)
         self._update_sidebar_status()
         if hasattr(self, "apps_page"):
-            self.apps_page.refresh()
-            self.files_view.refresh()
-            self.manual_view.refresh_theme()
-            if self.stack.currentWidget() is self.analytics_view:
+            page = self.stack.currentWidget()
+            if changed:
+                if page is self.apps_page:
+                    self.apps_page.refresh()
+                elif page is self.files_view:
+                    self.files_view.refresh()
+                self.manual_view.refresh_theme()
+            if page is self.analytics_view:
                 self.analytics_view.refresh()
             self._refresh_queue()
 
@@ -1455,7 +1473,7 @@ class MainWindow(QMainWindow):
         self.apps.ghost_after_days = self.settings_store.settings.ghost_after_days
         self._apply_theme()
         root = self.settings_store.settings.resolved_output_root()
-        self.files_view.set_output_root(root)
+        self.files_view.set_output_root(root, refresh=self.current_page() == "files")
         self.manual_view.set_output_root(root)
         self._update_sidebar_status()
         self.statusBar().showMessage(C.STATUS_SETTINGS_APPLIED, 3000)
