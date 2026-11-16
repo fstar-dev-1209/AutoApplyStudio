@@ -13,14 +13,13 @@ from core.discovery_runner import (
     ERROR,
     HUMAN_CHECK,
     IDLE,
-    MAX_DETAILS_PER_RUN,
     WAITING_LOGIN,
     DiscoveryRunner,
     keep_posting_for_target,
     partition_listings,
     within_hours,
 )
-from core.models import QueueStore
+from core.models import JobStatus, QueueStore
 from core.settings_store import AppSettings
 
 NOW = datetime(2026, 11, 5, 15, 0, tzinfo=timezone.utc)
@@ -50,6 +49,7 @@ class Env:
         self.error: Exception | None = None
         self.reads = []
         self.detail_calls: list[str] = []
+        self.now = NOW
 
         def read(ctx, url, *, is_known, pause, debug_dir=None, max_age_hours=None):
             self.reads.append((url, set(is_known.__self__) if hasattr(is_known, "__self__") else None))
@@ -75,7 +75,7 @@ class Env:
             self.service, lambda: self.settings, lambda: FakeHost(),
             on_queued=self.queued_batches.append, alert=lambda t, b: self.alerts.append((t, b)),
             read=read, read_detail=read_detail,
-            pause=lambda lo, hi: None, now=lambda: NOW, rng=random.Random(1),
+            pause=lambda lo, hi: None, now=lambda: self.now, rng=random.Random(1),
         )
 
 
@@ -126,16 +126,115 @@ def test_a_second_copy_of_the_same_greenhouse_job_is_not_opened(env):
     assert (report.queued, report.duplicate) == (1, 1)
 
 
-def test_other_sites_do_not_use_up_the_page_budget(env):
-    greenhouse = [posting(n, apply_url=GH.format(n=n)) for n in range(1, MAX_DETAILS_PER_RUN + 6)]
+def test_other_sites_do_not_use_up_the_batch(env):
+    greenhouse = [posting(n, apply_url=GH.format(n=n)) for n in range(1, 46)]
     others = [posting(100 + n, apply_url=f"https://jobs.lever.co/co/j{n}") for n in range(30)]
     env.page = others + greenhouse  # other sites come first and must not crowd out Greenhouse
     report = env.runner.run_once()
-    assert report.unsupported == 30 and report.queued == MAX_DETAILS_PER_RUN
-    assert env.detail_calls == [f"j{n}" for n in range(1, MAX_DETAILS_PER_RUN + 1)]
-    rest = env.runner.run_once()
-    assert rest.queued == 5 and rest.seen == 30 + MAX_DETAILS_PER_RUN
-    assert env.detail_calls == [f"j{n}" for n in range(1, MAX_DETAILS_PER_RUN + 6)]
+    assert report.unsupported == 30 and report.queued == 20  # the default: 20 new jobs an hour
+    assert env.detail_calls == [f"j{n}" for n in range(1, 21)]  # pages are opened only until the batch is full
+    assert report.capped == 25
+
+
+def test_postings_that_did_not_fit_are_dropped_not_kept_for_the_next_batch(env):
+    env.page = [posting(n, apply_url=GH.format(n=n)) for n in range(1, 26)]
+    first = env.runner.run_once()
+    assert (first.queued, first.capped) == (20, 5)
+    rows = {r["external_id"]: r for r in env.service.recent(limit=50)}
+    assert rows["j25"]["state"] == "filtered" and "limit of 20" in rows["j25"]["reason"]
+    env.now = datetime.now(timezone.utc) + timedelta(hours=1)
+    second = env.runner.run_once()
+    assert second.queued == 0 and second.seen == 25  # the five are not picked up an hour later
+    assert len(env.store.jobs()) == 20
+
+
+def test_the_freshest_postings_are_taken_even_when_they_are_last_on_the_page(env):
+    env.settings.discovery_hourly_cap = 2
+    stamp = lambda hours: (NOW - timedelta(hours=hours)).isoformat()  # noqa: E731
+    env.page = [Listing(f"j{n}", title="Dev", company=f"Co{n}", apply_url=GH.format(n=n), posted_at=stamp(h))
+                for n, h in [(1, 20), (2, 15), (3, 1), (4, 9), (5, 2)]]
+    report = env.runner.run_once()
+    assert report.queued == 2
+    assert [j.url for j in env.store.jobs()] == [GH.format(n=3), GH.format(n=5)]  # 1 and 2 hours old, freshest first
+
+
+def test_two_jobs_at_one_company_in_one_run_take_one_slot(env):
+    env.page = [Listing("a", title="SRE", company="Acme, Inc.", apply_url=GH.format(n=1), posted_at="1 hour ago"),
+                Listing("b", title="Backend", company="ACME", apply_url=GH.format(n=2), posted_at="2 hours ago"),
+                Listing("c", title="Data", company="Other Co", apply_url=GH.format(n=3), posted_at="3 hours ago")]
+    report = env.runner.run_once()
+    assert (report.queued, report.filtered) == (2, 1)
+    assert env.detail_calls == ["a", "c"]  # the second Acme job's page is never opened
+    rows = {r["external_id"]: r for r in env.service.recent(limit=10)}
+    assert "Another job at ACME is already in the queue" in rows["b"]["reason"]
+
+
+def test_a_company_with_a_job_in_the_queue_is_not_queued_again_unless_that_job_was_dropped(env):
+    env.page = [Listing("a", title="SRE", company="Acme", apply_url=GH.format(n=1), posted_at="1 hour ago")]
+    env.runner.run_once()
+    env.page = [Listing("b", title="Backend", company="Acme Inc", apply_url=GH.format(n=2), posted_at="1 hour ago")]
+    assert env.runner.run_once().queued == 0
+    env.service.expire([env.store.jobs()[0].id])
+    env.page = [Listing("c", title="Data", company="Acme", apply_url=GH.format(n=3), posted_at="1 hour ago")]
+    assert env.runner.run_once().queued == 1  # a skipped job does not hold its company
+
+
+def _hour_later(env, minutes=60):
+    env.now = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+
+def test_an_older_batch_still_waiting_is_dropped_when_a_fresh_one_arrives(env):
+    env.page = [posting(n, apply_url=GH.format(n=n)) for n in range(1, 6)]
+    env.runner.run_once()
+    old = list(env.store.jobs())
+    generating, done = old[0], old[1]
+    generating.status = JobStatus.GENERATING
+    env.store.update(generating)
+    done.status, done.resume_json = JobStatus.DONE, {"company_name": "Co2"}
+    env.store.update(done)
+    _hour_later(env)
+    env.page = [posting(n, apply_url=GH.format(n=n)) for n in range(6, 9)]
+    report = env.runner.run_once()
+    assert (report.queued, report.expired) == (3, 3)
+    after = {j.id: j for j in env.store.jobs()}
+    assert [after[j.id].status for j in old] == [
+        JobStatus.GENERATING, JobStatus.DONE, JobStatus.SKIPPED, JobStatus.SKIPPED, JobStatus.SKIPPED]
+    dropped = after[old[2].id]
+    assert dropped.skip_reason.startswith("Expired") and dropped.stage == "Expired"
+    assert "skipped" in [e["event_type"] for e in env.store.list_events(dropped.id)]
+
+
+def test_nothing_is_dropped_when_nothing_fresher_arrives(env):
+    env.page = [posting(n, apply_url=GH.format(n=n)) for n in range(1, 4)]
+    env.runner.run_once()
+    _hour_later(env)
+    env.page = []
+    report = env.runner.run_once()
+    assert (report.queued, report.expired) == (0, 0)
+    assert all(j.status == JobStatus.QUEUED for j in env.store.jobs())  # old, but nobody is waiting behind them
+
+
+def test_a_batch_that_is_still_fresh_and_full_takes_nothing_and_loses_nothing(env):
+    env.settings.discovery_hourly_cap = 3
+    env.page = [posting(n, apply_url=GH.format(n=n)) for n in range(1, 4)]
+    env.runner.run_once()
+    env.page = [posting(n, apply_url=GH.format(n=n)) for n in range(4, 6)]
+    env.now = datetime.now(timezone.utc) + timedelta(minutes=5)  # the same batch, five minutes on
+    report = env.runner.run_once()
+    assert report.queued == 0 and env.service.counts() == {"queued": 3}  # j4 and j5 were not recorded as dropped
+    _hour_later(env)
+    assert env.runner.run_once().queued == 2  # the next batch takes them (and replaces the three still waiting)
+
+
+def test_the_batch_follows_the_hourly_cap_and_the_interval():
+    s = AppSettings(discovery_hourly_cap=20, discovery_interval_minutes=60)
+    assert s.discovery_batch_size() == 20
+    s.discovery_interval_minutes = 10
+    assert s.discovery_batch_size() == 4  # a sixth of an hour: 3.3, rounded up
+    s.discovery_interval_minutes = 120
+    assert s.discovery_batch_size() == 40
+    assert AppSettings().discovery_interval_minutes == 60 and AppSettings().discovery_hourly_cap == 20
+    assert AppSettings.from_dict({"discovery_hourly_cap": 0}).discovery_hourly_cap == 1
 
 
 def test_a_blocked_greenhouse_job_is_not_opened(env):
@@ -297,3 +396,35 @@ def test_what_the_last_read_saw_is_kept_for_the_page_and_the_log(tmp_path):
     e.runner.run_once()
     assert any("RuntimeError: boom" in line for line in e.runner.status.detail)
     e.store.database.close()
+
+
+def test_the_report_counts_what_was_listed_and_why_greenhouse_jobs_were_left_out(env):
+    first = Listing("a", title="SRE", company="Acme", apply_url=GH.format(n=1), posted_at="1 hour ago")
+    env.page = [first]
+    env.runner.run_once()
+    env.settings.discovery_blocked_companies = "Bad Corp"
+    env.page = [
+        Listing("b", title="Backend", company="Acme Inc", apply_url=GH.format(n=2), posted_at="2 hours ago"),
+        Listing("c", title="Data", company="Bad Corp", apply_url=GH.format(n=3), posted_at="2 hours ago"),
+        Listing("d", title="Same", company="Dup Co", apply_url=GH.format(n=1), posted_at="2 hours ago"),
+        Listing("e", title="Other", company="Lever Co", apply_url="https://jobs.lever.co/a/b", posted_at="2 hours ago"),
+        Listing("f", title="Ops", company="Fresh Co", apply_url=GH.format(n=6), posted_at="2 hours ago"),
+        Listing("g", title="Old", company="Old Co", apply_url=GH.format(n=7), posted_at="5 days ago"),
+    ]
+    seen = []
+    env.runner._on_report = seen.append
+    report = env.runner.run_once()
+    assert report is seen[0]
+    assert (report.listed, report.recent) == (6, 5)  # the old one is not recent
+    assert (report.queued, report.unsupported, report.greenhouse) == (1, 1, 4)
+    assert report.reasons == {"another job at the company is queued": 1, "company on your block list": 1,
+                              "same posting already known": 1}
+
+
+def test_a_failing_report_hook_never_stops_the_search(env):
+    def boom(report):
+        raise RuntimeError("telegram is down")
+
+    env.runner._on_report = boom
+    env.page = [posting(1, apply_url=GH.format(n=1))]
+    assert env.runner.run_once().queued == 1

@@ -207,6 +207,7 @@ def test_auto_apply_settings_round_trip_and_secrets_stay_out_of_the_file(qtbot, 
     sv.show()
     sv.disc_enabled.setChecked(True)
     sv.disc_interval.setValue(7)
+    sv.disc_cap.setValue(12)
     sv.disc_blocked.setText("Staffing Co, Bad Corp")
     sv.bot_tz.setText("America/Chicago")
     sv.hour_from.setValue(8)
@@ -218,6 +219,7 @@ def test_auto_apply_settings_round_trip_and_secrets_stay_out_of_the_file(qtbot, 
     sv.save()
     s = settings.settings
     assert (s.discovery_enabled, s.discovery_interval_minutes, s.bot_timezone) == (True, 7, "America/Chicago")
+    assert s.discovery_hourly_cap == 12
     assert (s.active_start_hour, s.active_end_hour, s.apply_daily_cap) == (8, 20, 25)
     assert settings.notify_secret("discord_webhook").endswith("secrettoken") and s.notify_telegram_chat == "777"
     raw = (tmp / "settings.json").read_text(encoding="utf-8")
@@ -231,7 +233,7 @@ def test_bad_values_in_an_old_or_edited_settings_file_fall_back_safely():
     s = AppSettings.from_dict({"discovery_interval_minutes": "x", "apply_daily_cap": 99999, "bot_timezone": "Mars/Base",
                                "apply_mode": "yolo", "active_end_hour": 0, "discovery_url": "javascript:alert(1)",
                                "apply_facts": {"relocation": "maybe", "city": "Austin"}})
-    assert (s.discovery_interval_minutes, s.apply_daily_cap, s.bot_timezone) == (10, 500, "America/New_York")
+    assert (s.discovery_interval_minutes, s.apply_daily_cap, s.bot_timezone) == (60, 500, "America/New_York")
     assert (s.apply_mode, s.active_end_hour, s.discovery_url) == ("off", 1, "")
     assert s.apply_facts == {"city": "Austin"}
     assert AppSettings().apply_mode == "off" and AppSettings().discovery_enabled is False  # everything starts off

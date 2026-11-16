@@ -20,6 +20,7 @@ from core.discovery_runner import DiscoveryRunner
 from core.mail_code import OutlookMail
 from core.models import QueueStore
 from core.notify import Notifier
+from core.reports import Reporter
 from core.paths import company_folder_exists, config_dir
 from core.settings_store import AppSettings, SettingsStore
 
@@ -71,11 +72,12 @@ class BotServices:
             discord_webhook=lambda: settings_store.notify_secret("discord_webhook"),
             telegram=lambda: (settings_store.notify_secret("telegram_token"), settings_store.settings.notify_telegram_chat),
             in_app=in_app_alert)
+        self.reporter = Reporter(self.notifier, lambda: settings_store.settings.notify_reports, self.data_dir)
         self.discovery_service = DiscoveryService(store, company_check=self._company_reason)
         self.store = store
         self.discovery = DiscoveryRunner(
             self.discovery_service, lambda: settings_store.settings, self.host, on_queued=on_queued,
-            alert=self.notifier.send, log=FileLog(self.data_dir / "discovery.log"),
+            alert=self.notifier.send, on_report=self.reporter.discovery, log=FileLog(self.data_dir / "discovery.log"),
             debug_dir=self.data_dir / "discovery_debug")
         self.apply = ApplyRunner(
             store, apps, lambda: settings_store.settings, self.host, ask_chat=ask_chat, alert=self.notifier.send,
@@ -83,7 +85,7 @@ class BotServices:
             mail=OutlookMail(log=FileLog(self.data_dir / "apply_debug.log"),
                              shot_path=str(self.data_dir / "apply_shots" / "outlook-no-code.png")),
             debug_log=FileLog(self.data_dir / "apply_debug.log"),
-            save_settings=settings_store.save)
+            save_settings=settings_store.save, reporter=self.reporter)
 
     # ------------------------------------------------------------------ the browser
 
@@ -142,4 +144,5 @@ class BotServices:
 
     def refresh_rules(self) -> DiscoveryRules:
         s = self.settings_store.settings
-        return DiscoveryRules.from_text(s.discovery_blocked_companies, s.discovery_exclude_words)
+        return DiscoveryRules.from_text(s.discovery_blocked_companies, s.discovery_exclude_words,
+                                        s.salary_floor if s.discovery_skip_below_floor else 0)

@@ -19,6 +19,7 @@ from core.settings_store import ProfileSettings
 
 FILL, CHAT, SKIP, NEEDS = "fill", "chat", "skip", "needs"
 RESUME_FILE, COVER_FILE = "@resume", "@cover"  # values meaning "attach the generated file"
+OPTIONAL_REASON = "Optional: left blank"
 
 
 @dataclass
@@ -65,6 +66,8 @@ class Context:
     resume: dict = field(default_factory=dict)  # this job's resume JSON: the source of employer, title and experience
     today: date = field(default_factory=date.today)
     form_answers: dict[str, str] = field(default_factory=dict)  # a question's own options, once you have picked one
+    skip_optional: bool = False  # leave every question the form does not require blank (files are still attached)
+    pay: object | None = None  # core.salary_answer.PayContext: when set, salary questions are answered from the job's pay
 
 
 # Questions that are never answered by an AI, whatever else we know.
@@ -77,7 +80,8 @@ SENSITIVE = re.compile(
 
 # (fact key, label regex). First match wins, so specific rules come before general ones.
 RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in [
-    ("first_name", r"^(legal |preferred )?first name|^given name|^first$"),
+    ("first_name", r"^(legal |preferred )?first name|^given name|^first$|"
+                   r"^(what(?:'s| is) your |your |please (?:provide|enter) your )?preferred (first )?name\??:?\s*$"),
     ("last_name", r"^(legal )?last name|^family name|^surname|^last$"),
     ("full_name", r"^(full |legal |your |candidate )?name$|first and last name|\b(full|legal) (legal )?name\b"),
     ("email", r"e-?mail"),
@@ -441,6 +445,8 @@ def decide(f: Field, ctx: Context) -> Decision:
 
     if f.value.strip() and f.kind not in {"radio", "checkbox"}:
         return Decision(SKIP, reason="Already filled")
+    if ctx.skip_optional and not f.required:
+        return Decision(SKIP, reason=OPTIONAL_REASON)  # a form accepts it blank, so no answer is ever invented
     if f.kind in {"radio", "checkbox"} and f.value == "checked":
         return Decision(SKIP, reason="Already chosen")
 
@@ -476,6 +482,8 @@ def decide(f: Field, ctx: Context) -> Decision:
         return _unanswerable(f, f"Asks two things at once: {label}")
     if key == "time_zone":
         return _time_zone_decision(f, ctx)
+    if key == "salary_expectation" and ctx.pay is not None:
+        return Decision(CHAT, source="salary")  # one figure for the job, inside its posted range (core.salary_answer)
     if key == "years_experience" and ctx.chat_enabled and (f.options or f.kind in {"text", "textarea", "number"}):
         return Decision(CHAT, source="chat")  # the chat reads the resume; the date arithmetic below is the fallback
     if key:

@@ -31,7 +31,8 @@ class FakeApplier:
 
     def apply(self, context, url, *, form_ctx, files, submit, tag, company, role=""):
         self.env.calls.append({"url": url, "submit": submit, "company": company, "files": files,
-                               "chat": form_ctx.chat_enabled, "stop": self.should_stop(), "answer": self.answer, "role": role})
+                               "chat": form_ctx.chat_enabled, "stop": self.should_stop(), "answer": self.answer, "role": role,
+                               "skip_optional": form_ctx.skip_optional, "pay": form_ctx.pay})
         result = self.env.outcomes.pop(0) if self.env.outcomes else ApplyOutcome(SUBMITTED, "Application received.")
         if isinstance(result, Exception):
             raise result
@@ -363,11 +364,9 @@ def test_has_experience_needs_at_least_one_real_job():
     assert not has_experience({})
 
 
-def test_auto_apply_waits_until_the_real_work_history_is_set(env):
+def test_an_empty_work_history_does_not_hold_auto_apply_back(env):
     job = env.job(1)
     env.settings.profile.work_history = ""
-    assert "work history" in env.runner.eligible(env.store.get(job.id), env.settings)
-    env.settings.apply_mode = "dry_run"  # a dry run sends nothing, so it may go ahead
     assert "work history" not in env.runner.eligible(env.store.get(job.id), env.settings)
 
 
@@ -376,3 +375,57 @@ def test_a_resume_naming_an_employer_outside_the_work_history_is_never_sent(env)
     job.resume_json = {"cover_letter": "Dear team", "experience": [{"company": "KPMG", "title": "Analyst"}]}
     env.store.update(job)
     assert "not in your work history" in env.runner.eligible(env.store.get(job.id), env.settings)
+
+
+class _Told:
+    def __init__(self):
+        self.calls = []
+
+    def application(self, job, state, reason, plan, confirmation, submitted_ok):
+        self.calls.append((job.company, state, submitted_ok, [p["label"] for p in plan], confirmation))
+
+
+def test_every_result_is_reported_and_a_sent_application_carries_its_answers(env):
+    told = _Told()
+    env.runner._reporter = told
+    plan = [{"label": "First Name", "action": "fill", "source": "profile", "value": "Mary"}]
+    env.outcomes = [ApplyOutcome(SUBMITTED, "Application received.", plan, confirmation="Thank you for applying"),
+                    ApplyOutcome(FAILED, "boom"), ApplyOutcome(NEEDS_YOU, "Which office?")]
+    jobs = [env.job(n, completed_minutes_ago=n) for n in (1, 2, 3)]
+    for _ in jobs:
+        env.tick()
+    assert [(c[1], c[2]) for c in told.calls] == [("submitted", True), ("failed", False), ("needs_you", False)]
+    assert told.calls[0][3] == ["First Name"] and told.calls[0][4] == "Thank you for applying"
+
+
+def test_a_report_that_breaks_does_not_undo_an_application_that_was_sent(env):
+    class Broken:
+        def application(self, *a, **k):
+            raise RuntimeError("telegram is down")
+
+    env.runner._reporter = Broken()
+    job = env.job(1)
+    assert env.tick().state == SUBMITTED and env.store.get(job.id).applied_at
+
+
+def test_optional_questions_are_left_blank_unless_the_setting_says_otherwise(env):
+    env.job(1, completed_minutes_ago=1)
+    env.tick()
+    env.settings.apply_skip_optional = False
+    env.job(2, completed_minutes_ago=2)
+    env.tick()
+    assert [c["skip_optional"] for c in env.calls] == [True, False]  # on by default; the setting reaches the form
+
+
+def test_the_form_filler_is_given_the_jobs_own_pay_and_your_salary_rules(env):
+    env.settings.salary_floor, env.settings.salary_band_low, env.settings.salary_band_high = 95_000, 30, 50
+    env.settings.apply_facts = {"salary_expectation": "$140,000"}
+    job = env.job(1)
+    job.salary_min, job.salary_max, job.salary_period, job.salary_currency = 100_000, 130_000, "year", "USD"
+    job.salary_text = "$100K/yr - $130K/yr"
+    env.store.update(job)
+    env.tick()
+    pay = env.calls[0]["pay"]
+    assert (pay.low, pay.high, pay.period, pay.floor) == (100_000, 130_000, "year", 95_000)
+    assert (pay.band_low, pay.band_high, pay.fallback) == (30, 50, "$140,000")
+    assert pay.aim() == 110_000  # 40% of the way from 100K to 130K is 112K, tidied to the nearest 5K

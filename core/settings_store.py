@@ -151,7 +151,8 @@ class AppSettings:
     web_proxy: str = ""  # optional proxy for the chat browser (and the apply browser), e.g. http://1.2.3.4:8080
     # --- auto apply (all off / safe until switched on in Settings)
     discovery_enabled: bool = False  # poll Jobright for new postings
-    discovery_interval_minutes: int = 10
+    discovery_interval_minutes: int = 60  # one batch of fresh postings per interval, newest first
+    discovery_hourly_cap: int = 20  # new jobs queued per hour; what is not queued or not generated in time is dropped
     discovery_url: str = ""  # blank = Jobright's recommended list; your filters live in your Jobright account
     discovery_max_age_hours: int = 24  # only postings from the last day
     discovery_blocked_companies: str = ""  # comma / newline separated
@@ -162,6 +163,12 @@ class AppSettings:
     bot_browser: str = "chrome"  # chrome | msedge
     apply_mode: str = "off"  # off | dry_run | auto
     apply_daily_cap: int = 40  # applications the bot may submit per day
+    salary_floor: int = 80_000  # the least you accept, per year: salary answers never go below it
+    salary_band_low: int = 40  # aim this far (percent) into a job's posted pay range ...
+    salary_band_high: int = 55  # ... up to this far; the lower-middle, to get replies
+    discovery_skip_below_floor: bool = True  # do not queue a job whose posted pay tops out below your minimum
+    apply_skip_optional: bool = True  # questions the form does not require are left blank, never answered
+    notify_reports: bool = True  # status reports (job search, resumes, applications, answers) to Telegram/Discord
     apply_facts: dict[str, str] = field(default_factory=dict)  # see core.apply_facts; sealed with the app password
     form_questions: list[dict[str, Any]] = field(default_factory=list)  # a form's own choices, once it has asked; sealed too
     answer_prompt: str = ""  # style prompt for open questions; blank = core.chat_questions.DEFAULT_ANSWER_PROMPT
@@ -171,6 +178,15 @@ class AppSettings:
         if self.output_root.strip():
             return Path(self.output_root.strip())
         return default_output_root()
+
+    def discovery_batch_size(self) -> int:
+        """Jobs one discovery cycle may queue: the hourly cap, scaled to how often the cycle runs (60 min -> the cap)."""
+        return max(1, -(-self.discovery_hourly_cap * max(1, self.discovery_interval_minutes) // 60))
+
+    def discovery_window_minutes(self) -> float:
+        """A job still waiting to be generated this long after it was queued belongs to an earlier batch: half an
+        interval, so that the previous scheduled batch is always older than this when the next one arrives."""
+        return max(1, self.discovery_interval_minutes) / 2
 
     def masked_api_key(self) -> str:
         key = self.api_key.strip()
@@ -238,7 +254,8 @@ class AppSettings:
             chat_provider=str(data.get("chat_provider")) if data.get("chat_provider") in CHAT_PROVIDERS else "claude",
             web_proxy=normalize_proxy_url(str(data.get("web_proxy") or "")),
             discovery_enabled=bool(data.get("discovery_enabled", False)),
-            discovery_interval_minutes=_clamp(data.get("discovery_interval_minutes"), 2, 240, 10),
+            discovery_interval_minutes=_clamp(data.get("discovery_interval_minutes"), 2, 240, 60),
+            discovery_hourly_cap=_clamp(data.get("discovery_hourly_cap"), 1, 200, 20),
             discovery_url=_https_url(data.get("discovery_url")),
             discovery_max_age_hours=_clamp(data.get("discovery_max_age_hours"), 1, 168, 24),
             discovery_blocked_companies=str(data.get("discovery_blocked_companies") or "").strip(),
@@ -249,6 +266,12 @@ class AppSettings:
             bot_browser=str(data.get("bot_browser")) if data.get("bot_browser") in {"chrome", "msedge"} else "chrome",
             apply_mode=str(data.get("apply_mode")) if data.get("apply_mode") in {"off", "dry_run", "auto"} else "off",
             apply_daily_cap=_clamp(data.get("apply_daily_cap"), 1, 500, 40),
+            salary_floor=_clamp(data.get("salary_floor"), 0, 5_000_000, 80_000),
+            salary_band_low=_clamp(data.get("salary_band_low"), 0, 100, 40),
+            salary_band_high=max(_clamp(data.get("salary_band_high"), 0, 100, 55), _clamp(data.get("salary_band_low"), 0, 100, 40)),
+            discovery_skip_below_floor=bool(data.get("discovery_skip_below_floor", True)),
+            apply_skip_optional=bool(data.get("apply_skip_optional", True)),
+            notify_reports=bool(data.get("notify_reports", True)),
             apply_facts=clean_facts(data.get("apply_facts")),
             form_questions=clean_form_questions(data.get("form_questions")),
             answer_prompt=str(data.get("answer_prompt") or "").strip(),

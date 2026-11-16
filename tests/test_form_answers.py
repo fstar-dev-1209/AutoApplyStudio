@@ -534,6 +534,10 @@ def test_the_name_asked_for_in_a_sentence_comes_from_the_profile_not_the_chat():
     assert classify("Please provide your legal first and last name.") == "full_name"
     assert classify("What is your full name?") == "full_name"
     assert classify("Do you have a preferred name different from your legal name?") != "full_name"
+    # "preferred name" as a plain field is the first name; it is never worth a question to the chat
+    assert classify("What is your preferred name?") == "first_name"
+    assert classify("Preferred name") == "first_name"
+    assert classify("Do you have a preferred name different from your legal name?") != "first_name"
 
 
 KOMODO = ("We'd love to learn more about your working preferences. Roles at Komodo are labeled as either Remote, "
@@ -605,3 +609,20 @@ def test_authorized_and_which_status_in_one_text_question_is_answered_from_both_
     d = decide(text(WEKA, required=True), ctx(facts={"visa_status": "US citizen"}))
     assert (d.action, d.value) == (FILL, "Yes, US citizen")
     assert decide(text(WEKA, required=True), ctx()).action == NEEDS  # no saved work status: still yours to answer
+
+
+def test_a_question_the_form_does_not_require_is_skipped_when_blanks_are_allowed():
+    from core.form_answers import OPTIONAL_REASON
+
+    profile = ProfileSettings(name="Mary Ann Berg", email="mary@example.com", linkedin_url="https://linkedin.com/in/mary")
+    optional = Field(ref="a", kind="text", label="LinkedIn Profile", required=False)
+    required = Field(ref="b", kind="text", label="Email", required=True)
+    cover = Field(ref="c", kind="file", label="Cover Letter", required=False, slot="cover")
+    keep = Context(profile=profile, has_cover=True, skip_optional=False)
+    skip = Context(profile=profile, has_cover=True, skip_optional=True)
+    assert decide(optional, keep).action == FILL  # the old behaviour is still there when switched off
+    assert (decide(optional, skip).action, decide(optional, skip).reason) == (SKIP, OPTIONAL_REASON)
+    assert decide(required, skip).action == FILL and decide(required, skip).value == "mary@example.com"
+    assert decide(cover, skip).action == FILL  # attachments are not questions: the cover letter is still sent
+    chat_question = Field(ref="d", kind="textarea", label="Why do you want to work here?", required=False)
+    assert decide(chat_question, Context(profile=profile, chat_enabled=True, skip_optional=True)).action == SKIP

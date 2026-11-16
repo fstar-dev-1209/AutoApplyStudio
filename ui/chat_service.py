@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtWebEngineCore import QWebEnginePage
@@ -40,9 +40,20 @@ class ChatService(QObject):
 
     activity = Signal(str)
 
-    def __init__(self, page: QWebEnginePage, parent: QObject | None = None, *, site: ChatSite | None = None) -> None:
+    # The system clipboard is shared by every chat page in the app. While one page pastes its prompt (the clipboard
+    # holds that prompt until the page has taken it) no other page may start one: it would paste the wrong text.
+    _paste_owner: ClassVar["ChatService | None"] = None
+
+    @classmethod
+    def paste_in_progress(cls) -> bool:
+        """True while a chat page is in the middle of pasting; a message for another page must wait its turn."""
+        return cls._paste_owner is not None
+
+    def __init__(self, page: QWebEnginePage, parent: QObject | None = None, *, site: ChatSite | None = None,
+                 view=None) -> None:
         super().__init__(parent)
         self._page = page
+        self._view = view  # the browser widget showing this page, when it is not the parent's ``browser``
         self.site: ChatSite = site or SITES[CLAUDE]
         self._busy = False
         self._progress: ProgressFn | None = None
@@ -367,8 +378,23 @@ class ChatService(QObject):
 
     def _ensure_new_chat(self) -> str:
         if not self.load_url(self.site.new_chat):
-            return f"Could not open a new {self.label} conversation."
+            ready = self._document_ready()
+            return (f"Could not open a new {self.label} conversation "
+                    f"(page at {self.current_url() or 'unknown'}, document {ready or 'not ready'}).")
         return ""
+
+    def _clear_composer(self) -> None:
+        """Empty the message box (text and any attached cards). ChatGPT keeps an unsent draft between visits, and a
+        draft left from another job must never be sent as this job's prompt."""
+        self._run_js(
+            "(() => { const c = document.querySelector('#prompt-textarea, div.ProseMirror[contenteditable=\"true\"], "
+            "textarea'); if (!c) return 'none'; const scope = c.closest('form') || document; "
+            "scope.querySelectorAll('button').forEach(b => { const l = (b.getAttribute('aria-label') || '').toLowerCase(); "
+            "if (/^remove|remove (file|attachment)|delete file/.test(l)) b.click(); }); c.focus(); "
+            "if (c.tagName === 'TEXTAREA') { c.value = ''; c.dispatchEvent(new Event('input', {bubbles: true})); } "
+            "else { const r = document.createRange(); r.selectNodeContents(c); const sel = window.getSelection(); "
+            "if (sel) { sel.removeAllRanges(); sel.addRange(r); } document.execCommand('delete'); } return 'ok'; })()",
+            timeout_ms=8000)
 
     def run_page_state(self) -> tuple[dict[str, Any], str]:
         return self._run_page_state()
@@ -512,8 +538,12 @@ class ChatService(QObject):
                 self._note(f"{label} is generating a response.")
                 return ""
             threshold = max(20, min_ok // 2)
-            composer_full = int(state.get("composerLength") or 0) >= threshold
+            composer_full = self._composer_length(state) >= threshold
             if composer_full and clicks < 3:
+                if not state.get("canSend"):
+                    state, wait_err, _ok = self._wait_send_enabled(30, 500)
+                    if wait_err:
+                        return wait_err
                 click_err = self._click_send()
                 if click_err:
                     return click_err
@@ -555,19 +585,32 @@ class ChatService(QObject):
             return self._sign_in_message(state)
         return ""
 
+    @staticmethod
+    def _box_holds_paste(state: dict[str, Any]) -> bool:
+        """The message box has the pasted prompt in it: a "Pasted text" card, or real text. An empty box reads as a
+        single blank line (length 1), which is not a paste."""
+        return int(state.get("attachments") or 0) > 0 or int(state.get("composerLength") or 0) >= 5
+
+    @staticmethod
+    def _composer_length(state: dict[str, Any]) -> int:
+        """What the message box holds. ChatGPT turns a long paste into a "Pasted text" card and leaves the box's own
+        text empty; that is a full box (the card is sent with the message), not a cleared one."""
+        if int(state.get("attachments") or 0) > 0:
+            return 10**9
+        return int(state.get("composerLength") or 0)
+
     def _reply_has_started(self, state: dict[str, Any], min_ok: int) -> bool:
         """True once Send took: the stop control is up, or the composer cleared and a new reply is on screen."""
         if state.get("isGenerating"):
             return True
         threshold = max(20, min_ok // 2)
-        cleared = int(state.get("composerLength") or 0) < threshold
+        cleared = self._composer_length(state) < threshold
         grew = int(state.get("assistantCount") or 0) > self._assistant_before
         return cleared and grew
 
     def _chat_view(self):
         """The embedded browser showing this page, when the chat tab owns the service."""
-        parent = self.parent()
-        browser = getattr(parent, "browser", None)
+        browser = self._view if self._view is not None else getattr(self.parent(), "browser", None)
         if browser is None:
             return None
         try:
@@ -596,7 +639,19 @@ class ChatService(QObject):
         self._pump_events(200)
 
     def _wake_send_button(self, prompt: str) -> str:
-        """Turn Send on by pasting with a real keystroke. Returns an error, or '' once the button is enabled."""
+        """Turn Send on by pasting with a real keystroke. Returns an error, or '' once the button is enabled.
+
+        One page at a time: the clipboard is shared (see ``paste_in_progress``)."""
+        owner = ChatService._paste_owner
+        if owner is not None and owner is not self:
+            return f"Another chat page is pasting right now; {self.label} must wait for the clipboard."
+        ChatService._paste_owner = self
+        try:
+            return self._paste_prompt(prompt)
+        finally:
+            ChatService._paste_owner = owner
+
+    def _paste_prompt(self, prompt: str) -> str:
         self._reveal_chat()
         view = self._chat_view()
         if view is None or not view.isVisible():
@@ -613,40 +668,67 @@ class ChatService(QObject):
             for attempt in range(3):
                 if attempt:
                     self._pump_events(4000)
-                if clipboard.text() != prompt:
-                    clipboard.setText(prompt)
-                # First the browser's own Paste command into the focused message box. It arrives as a real paste
-                # and needs no keyboard focus on the desktop, so it also works when the app is behind other
-                # windows or nobody is signed in to the screen (an unattended VPS).
-                if self._composer_has_focus():
-                    self._page.triggerAction(QWebEnginePage.WebAction.Paste)
-                    deadline = time.monotonic() + 3
-                    while time.monotonic() < deadline:
-                        self._pump_events(300)
-                        state, err = self._run_page_state()
-                        if err:
-                            return err
-                        seen = state
-                        if state.get("canSend"):
-                            self._note(f"Prompt pasted into {self.label}.")
-                            return ""
-                self._press_paste(view)
-                # Leave the prompt on the clipboard until ChatGPT has taken the paste.
-                deadline = time.monotonic() + 3
-                while time.monotonic() < deadline:
+                state, err = self._run_page_state()
+                if err:
+                    return err
+                # A paste that already landed (the text, or the "Pasted text" card ChatGPT makes of a long one) is never
+                # pasted again: on a slow machine the card shows up many seconds late, and a second paste sends the whole
+                # prompt twice in one message.
+                holds = self._box_holds_paste(state)
+                if holds and attempt == 0:
+                    # nothing of ours is in the box yet, so this is a draft left over from earlier: clear it
+                    self._note(f"Clearing an old draft from {self.label}'s message box.")
+                    self._clear_composer()
+                    self._pump_events(800)
                     state, err = self._run_page_state()
                     if err:
                         return err
-                    seen = state
-                    if state.get("canSend"):
-                        return ""
-                    self._pump_events(300)
+                    holds = self._box_holds_paste(state)
+                if not holds:
+                    if clipboard.text() != prompt:
+                        clipboard.setText(prompt)
+                    # First the browser's own Paste command into the focused message box. It arrives as a real paste
+                    # and needs no keyboard focus on the desktop, so it also works when the app is behind other
+                    # windows or nobody is signed in to the screen (an unattended VPS).
+                    if attempt == 0 and self._composer_has_focus():
+                        self._page.triggerAction(QWebEnginePage.WebAction.Paste)
+                    else:
+                        self._press_paste(view)
+                # Leave the prompt on the clipboard until ChatGPT has taken the paste.
+                state, err, ok = self._wait_send_enabled(45 if holds else 25, 300)
+                if err:
+                    return err
+                seen = state
+                if ok:
+                    self._note(f"Prompt pasted into {self.label}.")
+                    return ""
+                if self._box_holds_paste(state):
+                    break  # the paste took but Send never turned on: stop, do not paste it again
         finally:
             clipboard.setText(previous)
         detail = (f" (box holds {int(seen.get('composerLength') or 0):,} of {len(prompt):,} characters"
                   f"{', a reply is still being written' if seen.get('isGenerating') else ''})")
         return (f"{self.label} left Send disabled. The prompt is in the box, "
                 f"but the page did not accept it as typing.{detail}")
+
+    def _wait_send_enabled(self, seconds: float, pump_ms: int) -> tuple[dict[str, Any], str, bool]:
+        """Poll until Send is enabled. A long paste becomes a "Pasted text" card first and Send follows a moment
+        later, so once the card is there the wait is longer. Returns (last state, error, enabled)."""
+        deadline = time.monotonic() + seconds
+        extended = False
+        state: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            if pump_ms:
+                self._pump_events(pump_ms)
+            state, err = self._run_page_state()
+            if err:
+                return state, err, False
+            if state.get("canSend"):
+                return state, "", True
+            if int(state.get("attachments") or 0) > 0 and not extended:
+                extended = True
+                deadline = max(deadline, time.monotonic() + 30)
+        return state, "", False
 
     def _composer_has_focus(self) -> bool:
         """Focus the composer and select its own text. Never selects the page, which is what reloads ChatGPT."""

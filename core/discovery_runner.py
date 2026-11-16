@@ -1,4 +1,4 @@
-"""The 10-minute loop: read the Jobright list, open only the jobs the bot can apply to, queue those."""
+"""The hourly loop: read the Jobright list, open only the jobs the bot can apply to, queue the freshest batch."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ import time
 import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from core import ats, jobright
+from core.company_match import normalize_company
 from core.discovery import (
     QUEUED,
     UNRESOLVED,
@@ -19,11 +20,13 @@ from core.discovery import (
     DiscoveryService,
     IngestReport,
     Listing,
+    newest_first,
 )
+from core.job_order import moment
 from core.settings_store import AppSettings
 
 SOURCE = "jobright"
-MAX_DETAILS_PER_RUN = 15  # Jobright job pages opened per cycle; the rest are picked up on the next one
+MAX_DETAILS_PER_RUN = 40  # a safety stop: pages are opened freshest first until the batch is full, never past this
 
 IDLE, RUNNING, OFF, WAITING_LOGIN, HUMAN_CHECK, ERROR, SLEEPING = (
     "idle", "running", "off", "needs_login", "human_check", "error", "outside_hours")
@@ -88,6 +91,7 @@ class DiscoveryRunner:
         host: Callable[[], object],  # returns a started BrowserHost
         on_queued: Callable[[list[str]], None] = lambda ids: None,
         alert: Callable[[str, str], None] = lambda title, body: None,
+        on_report: Callable[[IngestReport], None] = lambda report: None,
         *,
         read=jobright.read_new_listings,
         read_detail=jobright.read_detail,
@@ -99,14 +103,14 @@ class DiscoveryRunner:
     ) -> None:
         self._log, self._debug_dir = log, debug_dir
         self.service, self._settings, self._host = service, settings, host
-        self._on_queued, self._alert = on_queued, alert
+        self._on_queued, self._alert, self._on_report = on_queued, alert, on_report
         self._read, self._read_detail, self._pause, self._now = read, read_detail, pause, now
         self._rng = rng or random.Random()
         self.status = DiscoveryStatus()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
-        self._alerted: str = ""  # the problem already reported, so a 10-minute loop does not repeat it
+        self._alerted: str = ""  # the problem already reported, so the loop does not repeat it
 
     # ------------------------------------------------------------------ thread
 
@@ -165,14 +169,22 @@ class DiscoveryRunner:
             self.status.detail = traceback.format_exc().strip().splitlines()[-6:]
             return self._problem(ERROR, f"{type(exc).__name__}: {exc}", "")
         self._alerted = ""
-        self.status.state, self.status.message = IDLE, f"{report.queued} queued, {report.unsupported} other sites"
+        self.status.state, self.status.message = IDLE, (
+            f"{report.queued} queued, {report.unsupported} other sites"
+            + (f", {report.capped} over the limit" if report.capped else "")
+            + (f", {report.expired} old job(s) dropped" if report.expired else ""))
         self.status.last_run = self._now().isoformat()
         self.status.runs += 1
         self.status.queued_total += report.queued
         self.status.last_report = {k: getattr(report, k) for k in
-                                   ("seen", "queued", "unsupported", "duplicate", "filtered", "unresolved")}
+                                   ("seen", "queued", "unsupported", "duplicate", "filtered", "unresolved",
+                                    "capped", "expired")}
         if report.queued_job_ids:
             self._on_queued(report.queued_job_ids)
+        try:
+            self._on_report(report)
+        except Exception:  # noqa: BLE001 - a status report must never stop the search
+            pass
         return report
 
     def _cycle(self, s: AppSettings) -> IngestReport:
@@ -188,22 +200,48 @@ class DiscoveryRunner:
         pending = [Listing(external_id=r["external_id"], title=r["title"], company=r["company"], location=r["location"],
                            source_url=r["source_url"], posted_at=r["posted_at"], apply_url=r["apply_url"])
                    for r in self.service.unresolved(SOURCE) if r["external_id"] not in listed]
-        rules = DiscoveryRules.from_text(s.discovery_blocked_companies, s.discovery_exclude_words)
+        rules = DiscoveryRules.from_text(s.discovery_blocked_companies, s.discovery_exclude_words,
+                                         s.salary_floor if s.discovery_skip_below_floor else 0)
         self.service._rules = lambda: rules
+        now = self._now()
+
+        # One batch per cycle, freshest first. Jobs of an earlier batch that are still waiting are older than the
+        # window; they are dropped (below) once there is something fresher to take their place.
+        waiting = self.service.waiting_jobs()
+        window = timedelta(minutes=s.discovery_window_minutes())
+        stale = [j.id for j in waiting if now - moment(j.created_at) >= window]
+        budget = max(0, s.discovery_batch_size() - (len(waiting) - len(stale)))
+        if budget == 0:
+            # The last batch is still fresh and fills the limit: nothing is taken (and nothing recorded as dropped),
+            # so the postings seen now are looked at again by the next cycle.
+            self._note([f"Read {len(result.listings)} job(s); the last batch ({len(waiting)} jobs) is still waiting "
+                        f"and fills the limit of {s.discovery_batch_size()}, so nothing new was queued."])
+            return IngestReport(seen=len([l for l in recent if l.external_id in known]),
+                                listed=len(result.listings), recent=len(recent))
         known_keys = set(self.service._known_keys())
+        companies = self.service.queue_company_keys(ignore_ids=stale)
 
         def decide(listing: Listing) -> str:
-            state, _reason, link = self.service._decide(listing, rules, known_keys)
-            if state == QUEUED and link.key:
-                known_keys.add(link.key)  # a second copy of the same posting in this list is not opened
+            state, _reason, link = self.service._decide(listing, rules, known_keys, companies)
+            if state == QUEUED:
+                if link.key:
+                    known_keys.add(link.key)  # a second copy of the same posting in this list is not opened
+                if normalize_company(listing.company):
+                    companies.add(normalize_company(listing.company))  # nor a second job at the same company
             return state
 
-        to_open, to_record = partition_listings([*fresh, *pending], decide)
-        batch = to_open[:MAX_DETAILS_PER_RUN]
+        candidates = newest_first([*fresh, *pending], now)
+        to_open, to_record = partition_listings(candidates, decide)
         opened: list[Listing] = []
+        unopened: list[Listing] = []
         problems: list[str] = []
         supported = self.service._supported()
-        for listing in batch:
+        taken = 0  # postings that will be queued: stop reading pages once the batch is full
+        for index, listing in enumerate(to_open):
+            if taken >= budget or len(opened) >= MAX_DETAILS_PER_RUN:
+                unopened = to_open[index:]
+                break
+            knew_the_link = bool(listing.apply_url.strip())
             try:
                 detail = host.run(lambda ctx, item=listing: self._read_detail(ctx, item, pause=self._pause), timeout=180)
             except (jobright.LoginRequired, jobright.HumanCheck):
@@ -211,19 +249,32 @@ class DiscoveryRunner:
             except Exception as exc:  # noqa: BLE001 - one page failing leaves that job for the next cycle
                 problems.append(f"{listing.external_id}: {type(exc).__name__}")
                 continue
-            opened.append(keep_posting_for_target(detail, supported))
+            item = keep_posting_for_target(detail, supported)
+            opened.append(item)
+            if knew_the_link:
+                taken += 1  # already counted when the list was sorted into pages to open
+            elif decide(item) == QUEUED:
+                taken += 1
         full = sum(1 for item in opened if jobright.is_full_posting(item.description))
         self._note([f"Read {len(result.listings)} job(s) ({result.from_json} from data, {result.from_dom} from page links); "
                     f"{len(recent)} posted within the last {s.discovery_max_age_hours}h"
                     + (f". First: {sample}" if sample else ""),
-                    f"Opened {len(batch)} Jobright page(s) for applyable jobs ({full} had the full posting); "
-                    f"left {len(to_record)} other or blocked job(s) unopened."
+                    f"Batch of {budget} (limit {s.discovery_batch_size()}, {len(waiting) - len(stale)} still waiting): "
+                    f"opened {len(opened)} Jobright page(s) for applyable jobs ({full} had the full posting); "
+                    f"{len(unopened)} fresh job(s) did not fit; left {len(to_record)} other or blocked job(s) unopened."
                     + (f" Could not open: {', '.join(problems)}" if problems else ""),
                     *result.trace[:16]])
+        # Only a batch with something fresh in it replaces the jobs still waiting from the last one.
+        expired = self.service.expire(stale) if taken and stale else 0
         # Visited pages first, so a duplicate later in the list sees the job just created.
         # Rows the list already settled are recorded with no visit. A list blurb never becomes the job text.
         settled = [l for l in recent if l.external_id in known]
-        return self.service.ingest(SOURCE, [*settled, *opened, *to_record])
+        report = self.service.ingest(
+            SOURCE, [*settled, *opened, *unopened, *to_record], limit=budget,
+            over_limit_ids=[l.external_id for l in unopened], ignore_ids=stale if expired else (), now=now)
+        report.expired = expired
+        report.listed, report.recent = len(result.listings), len(recent)
+        return report
 
     def _note(self, lines: list[str]) -> None:
         """Keep what the last read saw for the page, and append it to the log file."""

@@ -385,3 +385,29 @@ def test_a_posting_that_is_not_on_a_readable_site_keeps_whatever_description_it_
     monkeypatch.setattr(queue_engine, "scrape_job_url", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not scrape")))
     job = run(engine, store, queued_job(store, url="https://careers.example.com/job/5"))  # "We need an SRE." is its text
     assert job.status == JobStatus.DONE and job.job_description == "We need an SRE."
+
+
+def test_each_resume_result_is_reported(env):
+    engine, store, settings, tmp_path, calls = env
+    told = []
+
+    class Told:
+        def resume(self, job):
+            told.append((job.company, job.status))
+
+    engine.reporter = Told()
+    job = queued_job(store)
+    run(engine, store, job)
+    assert told and told[-1][1] == JobStatus.DONE
+
+
+def test_a_report_that_breaks_does_not_stop_the_queue(env):
+    engine, store, settings, tmp_path, calls = env
+
+    class Broken:
+        def resume(self, job):
+            raise RuntimeError("telegram is down")
+
+    engine.reporter = Broken()
+    job = queued_job(store)
+    assert run(engine, store, job).status == JobStatus.DONE

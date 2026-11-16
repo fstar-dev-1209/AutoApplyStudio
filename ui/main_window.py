@@ -48,7 +48,7 @@ from ui.analytics_view import AnalyticsView
 from ui.applications_view import ApplicationsPage
 from ui.autoapply_view import AutoApplyView
 from ui.chat_ask import AskResult, ChatAsker
-from ui.chat_service import CLAUDE_REPLY_WAIT_SEC
+from ui.chat_service import CLAUDE_REPLY_WAIT_SEC, ChatService
 from ui.claude_chat_view import ClaudeChatView
 from ui.page_renderer import PageRenderer
 from ui.claude_wait_coordinator import ClaudeGenResult, ClaudeWaitCoordinator
@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
 
         self._claude_signed_in = False
         self._claude_wait = threading.Event()
+        self._claude_begin_deferred = False
         self._claude_thread_result: dict | None = None
         self._claude_wait_error = ""
         self.engine_event.connect(self._on_engine_event)
@@ -544,6 +545,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _refresh_queue(self) -> None:
+        if getattr(self, "_closing", False):
+            return  # the database is closed (or closing); a late background event must not touch it
         status = self._queue_status_filter(self.queue_view.filter_key())
         page = self.queue_store.query_page(
             search=self.queue_view.search_text(),
@@ -932,24 +935,29 @@ class MainWindow(QMainWindow):
 
     def _claude_chat_generate(self, prompt: str, meta: dict, settings) -> dict:
         """Called from the queue worker — waits on main-thread timer, not a frozen UI loop."""
-        deadline = time.monotonic() + 1800
-        while self._call_on_ui(lambda _d: self._asker is not None and self._asker.active, None, wait=60):
-            # the chat page is answering an application question right now: take turns instead of failing
-            if time.monotonic() > deadline:
-                raise ClaudeError(f"{self.chat_label} stayed busy answering application questions.")
-            time.sleep(2)
+        # Questions from application forms have their own chat page and do not wait for this one. The two pages share
+        # the clipboard, so only the moment of pasting is taken in turns: wait (a few seconds at most) while the other
+        # page is pasting, then start.
+        deadline = time.monotonic() + 600
         self._pending_claude = (prompt, meta, settings)
         self._claude_wait.clear()
         self._claude_thread_result = None
         self._claude_wait_error = ""
         self._claude_blocked = ""
-        ok = QMetaObject.invokeMethod(
-            self,
-            "_claude_begin_on_main",
-            Qt.ConnectionType.BlockingQueuedConnection,
-        )
-        if not ok:
-            raise ClaudeError("Could not start Claude on the UI thread.")
+        while True:
+            self._claude_begin_deferred = False
+            ok = QMetaObject.invokeMethod(
+                self,
+                "_claude_begin_on_main",
+                Qt.ConnectionType.BlockingQueuedConnection,
+            )
+            if not ok:
+                raise ClaudeError("Could not start Claude on the UI thread.")
+            if not self._claude_begin_deferred:
+                break
+            if time.monotonic() > deadline:
+                raise ClaudeError(f"{self.chat_label} stayed busy pasting another message.")
+            time.sleep(1)
         if self._claude_wait_error:
             self._raise_chat_failure()
         if not self._claude_wait.wait(timeout=CLAUDE_REPLY_WAIT_SEC + 180):
@@ -974,6 +982,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _claude_begin_on_main(self) -> None:
+        if ChatService.paste_in_progress():
+            self._claude_begin_deferred = True  # the other page is pasting: the worker asks again in a second
+            return
         prompt, meta, settings = self._pending_claude
         service = self.claude_view.chat_service()
         job_id = self.engine.current_job_id
@@ -1038,9 +1049,10 @@ class MainWindow(QMainWindow):
         v.dismiss_requested.connect(self._dismiss_attempt)
         v.applied_requested.connect(self._applied_by_hand)
         v.facts_saved.connect(lambda: self.toast.show_message("Answers saved.", kind="success"))
-        if hasattr(self.engine, "hold_generation"):
-            self.engine.hold_generation = self._questions_want_the_chat
+        if hasattr(self.engine, "retry_pause_seconds"):
             self.engine.retry_pause_seconds = 20.0
+        if hasattr(self.engine, "reporter"):
+            self.engine.reporter = self.bot.reporter  # how each resume went, to Telegram
         self.bot.start()
         # Jobs the bot queued earlier (before a restart, or while the chat was signed out) must not wait for the next
         # new job to arrive before they are generated: look once a minute and start the worker when it is idle.
@@ -1157,21 +1169,17 @@ class MainWindow(QMainWindow):
                  timeout_sec: int = 300, wait_for_page_sec: int = 1800) -> AskResult:
         """Ask a question in a chat conversation and return the answer. Safe to call from any thread but the UI's.
 
-        Waits (up to ``wait_for_page_sec``) while the chat page is busy generating a resume, since both use the
-        same page."""
+        Questions use their own chat page, one question at a time; resume generation is not held up by them. Waits
+        (up to ``wait_for_page_sec``) only while that page is answering another question, or while the other page is
+        in the middle of pasting (the clipboard is shared)."""
         if self.is_viewer or self.claude_view is None:
             return AskResult(error="This copy of the app does not use a chat.")
-        self._asks_waiting = getattr(self, "_asks_waiting", 0) + 1  # the resume queue lets this go first
-        try:
-            return self._ask_chat_now(question_prompt, chat_url, context_prompt, timeout_sec, wait_for_page_sec)
-        finally:
-            self._asks_waiting -= 1
-            self._last_ask_done = time.monotonic()
+        return self._ask_chat_now(question_prompt, chat_url, context_prompt, timeout_sec, wait_for_page_sec)
 
-    def _questions_want_the_chat(self) -> bool:
-        """True while a form question is waiting or being answered, and for a few seconds after (the next question
-        of the same form follows at once)."""
-        return getattr(self, "_asks_waiting", 0) > 0 or time.monotonic() - getattr(self, "_last_ask_done", -1e9) < 8
+    def _question_service(self) -> ChatService:
+        """The chat page for application questions (the resume page when the view has no second one)."""
+        make = getattr(self.claude_view, "question_service", None)
+        return make() if callable(make) else self.claude_view.chat_service()
 
     def _ask_chat_now(self, question_prompt: str, chat_url: str, context_prompt: str, timeout_sec: int,
                       wait_for_page_sec: int) -> AskResult:
@@ -1194,11 +1202,12 @@ class MainWindow(QMainWindow):
         return box["result"]
 
     def _start_ask(self, args: dict) -> bool:
-        service = self.claude_view.chat_service()
+        service = self._question_service()
         if self._asker is None or self._asker.service is not service:
             self._asker = ChatAsker(service, self)
             self._asker.finished.connect(self._on_ask_finished)
-        if self._asker.active or service.busy:
+        if self._asker.active or service.busy or (service is not self.claude_view.chat_service()
+                                                  and ChatService.paste_in_progress()):
             return False
         self._ask_waiter = args["deliver"]
         if not self._asker.start(args["prompt"], chat_url=args["chat_url"], context_prompt=args["context"],
@@ -1481,6 +1490,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str, dict)
     def _on_engine_event(self, name: str, payload: dict) -> None:
+        if getattr(self, "_closing", False):
+            return
         if name == "claude_chat_started":
             self.toast.show_message(
                 f"{self.chat_label} is generating in the background — open it from the sidebar to watch, "
@@ -1518,6 +1529,7 @@ class MainWindow(QMainWindow):
                 self.files_view.refresh()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._closing = True  # stop UI refreshes first; background threads may still emit while they wind down
         if self.is_viewer:
             self.viewer.stop()
         else:

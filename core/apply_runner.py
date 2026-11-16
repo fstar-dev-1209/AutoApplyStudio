@@ -22,6 +22,8 @@ from core.company_match import applied_matches, normalize_company
 from core.discovery_runner import within_hours
 from core.form_answers import Context
 from core.form_filler import Files
+from core.job_order import application_order, posting_times
+from core.salary_answer import pay_context_for
 from core.greenhouse import (
     DRY_RUN, FAILED, HUMAN_CHECK, NEEDS_YOU, SUBMITTED, ApplyOutcome, GreenhouseApplier,
 )
@@ -159,6 +161,7 @@ class ApplyRunner:
         mail=None,
         debug_log: Callable[[str], None] = lambda text: None,
         save_settings: Callable[[], None] | None = None,
+        reporter=None,
     ) -> None:
         self.store, self.apps, self._settings, self._host = store, apps, settings, host
         self.attempts = AttemptStore(store)
@@ -169,6 +172,7 @@ class ApplyRunner:
         self._mail = mail  # object with snapshot(context) / fetch(context, before, company), or None
         self._debug_log = debug_log
         self._save_settings = save_settings
+        self._reporter = reporter  # core.reports.Reporter or None
         self.status = ApplyStatus()
         self._kill = threading.Event()
         self._stop = threading.Event()
@@ -275,8 +279,8 @@ class ApplyRunner:
             return "No resume file on disk"
         if job.resume_json and not has_experience(job.resume_json):
             return "The resume has no work experience; generate it again"
-        if s.apply_mode == "auto" and not (s.profile.work_history or "").strip():
-            return "Add your real work history in Settings before auto-applying"
+        # (An empty work history no longer holds auto mode back: the owner chose to apply with whatever resume exists.
+        # With a history set, a resume naming any other employer is still never sent.)
         if job.resume_json and employers_outside_history(job.resume_json, s.profile.work_history):
             return "The resume names an employer that is not in your work history; generate it again"
         history = self.attempts.for_job(job.id) if history is None else history
@@ -306,8 +310,8 @@ class ApplyRunner:
         applied = {normalize_company(j.company) for j in jobs if j.applied_at and j.company} - {""}
         history = self.attempts.by_job()
         done = [j for j in jobs if j.status == JobStatus.DONE and not j.applied_at]
-        done.sort(key=lambda j: j.completed_at or j.updated_at, reverse=True)  # newest first: speed matters
-        for job in done:
+        # The freshest posting first (speed matters: early applicants are read first), not the one finished last.
+        for job in application_order(done, posting_times(self.store.database)):
             if not self.eligible(job, s, history=history.get(job.id, []), applied=applied):
                 return job
         return None
@@ -366,7 +370,8 @@ class ApplyRunner:
             profile=s.profile, facts={**DEFAULTS, **s.apply_facts}, chat_enabled=chat is not None,
             cover_letter_text=str((job.resume_json or {}).get("cover_letter") or ""), resume=dict(job.resume_json or {}),
             has_resume=bool(files.resume), has_cover=bool(files.cover),
-            form_answers=answered_form_questions(s.form_questions))
+            form_answers=answered_form_questions(s.form_questions), skip_optional=s.apply_skip_optional,
+            pay=pay_context_for(job, s))
         answer = None
         if chat is not None:
             answer = make_answer_fn(job, chat, style_prompt=s.answer_prompt,
@@ -414,14 +419,27 @@ class ApplyRunner:
 
     # ------------------------------------------------------------------ recording
 
+    def _report(self, job: JobItem, outcome: ApplyOutcome) -> None:
+        """Tell the person how this application went; the questions and answers go with a sent one."""
+        if self._reporter is None:
+            return
+        try:
+            self._reporter.application(job, outcome.state, outcome.reason, outcome.plan, outcome.confirmation,
+                                       outcome.state == SUBMITTED)
+        except Exception:  # noqa: BLE001 - a report must never undo an application that was sent
+            pass
+
     def _record(self, job: JobItem, outcome: ApplyOutcome, submit: bool, label: str) -> None:
         payload = {"state": outcome.state, "reason": outcome.reason, "screenshot": outcome.screenshot}
         if outcome.state == SUBMITTED:
             self.apps.mark_applied(job.id, note="Submitted automatically by the apply bot")
+            self._report(job, outcome)
             return
         if outcome.state == DRY_RUN:
             self.store.add_event(job.id, EV.APPLY_DRY_RUN, payload)
+            self._report(job, outcome)
             return
         self.store.add_event(job.id, EV.APPLY_BLOCKED, payload)
+        self._report(job, outcome)
         if outcome.state in {NEEDS_YOU, HUMAN_CHECK}:  # failures retry by themselves; a closed posting needs no one
             self._alert(f"Needs you: {label}", outcome.reason or "The application needs your attention.")

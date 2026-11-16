@@ -11,12 +11,14 @@ import random
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from core.chat_questions import Question, clean_answer, match_option
-from core.form_answers import CHAT, FILL, NEEDS, SKIP, Context, Decision, Field, decide
+from core.salary_answer import figure_in, pick_bucket
+from core.salary_answer import render as render_salary
+from core.form_answers import CHAT, FILL, NEEDS, OPTIONAL_REASON, SKIP, Context, Decision, Field, decide
 from core.form_filler import FillError, Files, fill_field, probe_combobox
 from core.form_scan import ScanError, scan
 
@@ -222,9 +224,9 @@ class GreenhouseApplier:
         for f in fields:
             d = decide(f, form_ctx)
             if d.action == CHAT:
-                d = self._ask(f, form_ctx)
+                d = self._ask_salary(f, form_ctx) if d.source == "salary" else self._ask(f, form_ctx)
             entry = {"label": f.label, "kind": f.kind, "action": d.action, "source": d.source, "required": f.required,
-                     "value": (d.value[:400] if d.action == FILL and f.kind != "file" else d.value[:40]),
+                     "value": (d.value[:4000] if d.action == FILL and f.kind != "file" else d.value[:40]),  # in full: it is the record of what was sent
                      "reason": d.reason}
             if d.action == NEEDS and f.options:
                 entry["options"] = [o.label for o in f.options][:24]
@@ -241,6 +243,57 @@ class GreenhouseApplier:
                 todo.append((f, d))
         return plan, needs, todo
 
+    def _ask_salary(self, f: Field, form_ctx: Context) -> Decision:
+        """A salary question: one figure for the whole job (chosen once, inside its posted range), written the way
+        this field needs it. See core.salary_answer."""
+        pay = form_ctx.pay
+        optional = SKIP if not f.required else NEEDS
+        choices = [o.label for o in f.options] if f.kind in {"select", "combobox", "radio", "checkgroup"} else []
+        if not pay.target:
+            self._choose_salary_figure(pay, f)
+        if pay.target <= 0:
+            return Decision(optional, reason=f"No pay range is posted and no default salary is saved: {f.label}")
+        if choices:
+            picked = pick_bucket(choices, pay.target)
+            if not picked and self.answer is not None:
+                question = Question(f.label, options=choices, kind="salary", figure=pay.target, extra=self._pay_facts(pay))
+                try:
+                    picked = match_option(clean_answer(self.answer(question), f.max_chars), choices)
+                except Exception:  # noqa: BLE001 - the options could not be read as amounts and the chat did not help
+                    picked = ""
+            if not picked:
+                return Decision(optional, reason=f"No salary option fits ${pay.target:,}: {f.label}")
+            return Decision(FILL, picked, "salary", pay.basis)
+        return Decision(FILL, render_salary(pay, f.label, f.kind if f.input_type != "number" else "number", f.max_chars),
+                        "salary", pay.basis)
+
+    @staticmethod
+    def _pay_facts(pay) -> dict:
+        posted = pay.posted()
+        return {"low": posted[0] if posted else 0, "high": posted[1] if posted else 0, "period": "year",
+                "currency": "USD", "floor": pay.floor, "band_low": pay.band_low, "band_high": pay.band_high}
+
+    def _choose_salary_figure(self, pay, f: Field) -> None:
+        """Set ``pay.target`` and ``pay.basis``: the chat's figure, kept inside the limits; else worked out here."""
+        figure = 0
+        if self.answer is not None:
+            try:
+                raw = self.answer(Question(f.label, kind="salary", extra=self._pay_facts(pay)))
+                figure = figure_in(clean_answer(str(raw), 80))
+            except Exception:  # noqa: BLE001 - without the chat the figure is worked out here
+                figure = 0
+        source = "ChatGPT's figure"
+        if not figure:
+            figure, source = pay.aim(), ("the middle of your band" if pay.posted() else "your saved default")
+        pay.target = pay.clamp(figure) if figure else 0
+        if not pay.target:
+            return
+        posted = pay.describe_posted()
+        where = pay.position()
+        pay.basis = (f"Posted {posted}; aimed at {where}% of the range ({source})" if posted and where is not None
+                     else f"Posted {posted} ({source})" if posted
+                     else f"No range posted ({source}), at least your minimum of ${pay.floor:,}")
+
     def _ask(self, f: Field, form_ctx: Context) -> Decision:
         if self.answer is None:
             return Decision(NEEDS if f.required else SKIP, reason=f"No answer for: {f.label}")
@@ -255,7 +308,16 @@ class GreenhouseApplier:
         if not text:
             return Decision(NEEDS if f.required else SKIP, reason=f"The chat gave no usable answer to: {f.label}")
         if choices:  # the answer must be one of the form's own options, word for word
-            picked = match_option(text, choices)
+            picked = match_option(text, choices) or match_option(str(raw), choices)
+            if not picked:
+                # Ask once more, saying which answer was refused and that it must be copied from the list.
+                retry = replace(question, hint=(f"Your previous answer {text[:60]!r} is not one of the options. Reply "
+                                                "with exactly one option from the list, copied character for character."))
+                try:
+                    second = clean_answer(self.answer(retry), f.max_chars)
+                except Exception:  # noqa: BLE001 - the first answer's problem is the one to report
+                    second = ""
+                picked = match_option(second, choices) if second else ""
             if not picked:
                 return Decision(NEEDS if f.required else SKIP,
                                 reason=f"The chat's answer '{text[:40]}' is not one of the options for: {f.label}")
@@ -398,8 +460,8 @@ class GreenhouseApplier:
     def _fill_what_appeared_later(self, page, form_ctx: Context, files: Files, plan: list, notes: list[str]) -> list[str]:
         """Questions Greenhouse draws after an earlier answer, such as Race after Hispanic/Latino.
 
-        A race list is filled from the saved answer even when the form does not mark it required.
-        Returns reasons that still block sending."""
+        Without "leave optional questions blank" a race list is filled from the saved answer even when the form does
+        not mark it required. Returns reasons that still block sending."""
         quiet = 0
         for _ in range(4):
             fields, _meta = scan(page)
@@ -574,7 +636,11 @@ class GreenhouseApplier:
                     page.locator('[data-aas="submit"]').first.click(timeout=8000)
                     deadline = max(deadline, time.monotonic() + 20)
                     continue
-                return self._done(page, tag, "errors", NEEDS_YOU, "The site rejected the form: " + "; ".join(meta["errors"][:4]), plan)
+                left_blank = [p["label"] for p in plan if p.get("reason") == OPTIONAL_REASON and p.get("label")]
+                hint = (f" (Questions left blank because the form does not require them: {'; '.join(left_blank[:4])})"
+                        if left_blank else "")
+                return self._done(page, tag, "errors", NEEDS_YOU,
+                                  "The site rejected the form: " + "; ".join(meta["errors"][:4]) + hint, plan)
         if code_tried and self._code_step(page):
             self.debug_log(f"[{tag}] security code form still showing after submit")
             return self._done(page, tag, "code", NEEDS_YOU, "The security code was not accepted.", plan)

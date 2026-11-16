@@ -344,3 +344,33 @@ def test_a_page_whose_scripts_never_attached_is_a_failed_load_to_retry_not_quest
     board.stubborn = 2  # no dropdown opens, as on a page that never came alive
     out = run(host, board, files, tmp_path)
     assert out.state == "failed" and "never became usable" in out.reason and board.submissions == []
+
+
+def test_questions_the_form_does_not_require_are_left_blank_and_the_application_still_goes(host, board, files, tmp_path):
+    asked: list[str] = []
+
+    def answer(q):
+        asked.append(q.text)
+        return q.options[2] if q.options else "Built RAG pipelines, retrieval, ranking and evals, in production."
+
+    out = run(host, board, files, tmp_path, answer=answer, form_ctx=ctx(chat_enabled=True, skip_optional=True))
+    assert out.state == SUBMITTED, (out.reason, out.needs)
+    (sent,) = board.submissions
+    # what the form requires is answered, as before
+    assert sent["first_name"] == "Mary Ann" and sent["email"] == "mary@example.com"
+    assert sent["resume"] == "Mary_Resume.pdf" and sent["question_5"].startswith("Built RAG")
+    assert sent["snow"] == "3-5" and sent["privacy"] is True and sent["visa"] == "0"
+    # what it does not require is not answered: phone, LinkedIn, gender, veteran status ...
+    for name in ("phone", "question_1", "gender", "veteran_status"):
+        assert not sent.get(name), f"{name} should have been left blank, got {sent.get(name)!r}"
+    # ... and no question was put to the chat for them, but the cover letter (a file, not a question) is attached
+    assert not any("Gender" in q or "Veteran" in q or "LinkedIn" in q for q in asked)
+    assert sent["cover_letter"] == "Mary_Cover_Letter.docx"
+    skipped = [p["label"] for p in out.plan if p["reason"] == "Optional: left blank"]
+    assert "LinkedIn Profile" in skipped and "Gender" in skipped and "Phone" in skipped
+
+
+def test_an_optional_question_is_still_answered_when_leaving_blanks_is_switched_off(host, board, files, tmp_path):
+    out = run(host, board, files, tmp_path, form_ctx=ctx(chat_enabled=True, skip_optional=False))
+    assert out.state == SUBMITTED, (out.reason, out.needs)
+    assert board.submissions[0]["question_1"] == "https://linkedin.com/in/mary"

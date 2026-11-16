@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
 from core.chat_browser_profile import chat_web_profile, clear_chat_browser_data
 from core.chat_sites import CLAUDE, SITES
@@ -81,18 +81,33 @@ class ClaudeChatView(QWidget):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(0)
 
+        # Two pages of the same chat account (one sign-in): the left writes resumes, the right answers the questions
+        # of application forms. Each does its own work, so a question never waits for a resume or the other way round.
         self.browser = _KeepAliveView()
-        page = self._new_page()
+        page = self._new_page(self.browser)
         self.browser.setPage(page)
-        fl.addWidget(self.browser)
+        self.ask_browser = _KeepAliveView()
+        ask_page = self._new_page(self.ask_browser)
+        self.ask_browser.setPage(ask_page)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        # The resume page keeps the wide layout the chat site shows at 768 px and more (that is what the page reader was
+        # written for); the questions page may be narrower.
+        self.splitter.addWidget(self._pane("Resumes", self.browser, 780))
+        self.splitter.addWidget(self._pane("Application questions", self.ask_browser, 420))
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setSizes([900, 600])
+        fl.addWidget(self.splitter)
         root.addWidget(frame, stretch=1)
 
         hint = muted_label(C.CLAUDE_HINT)
         hint.setWordWrap(True)
         root.addWidget(hint)
 
-        self.service = ChatService(page, self, site=self.site)
+        self.service = ChatService(page, self, site=self.site, view=self.browser)
         self.service.activity.connect(self._on_activity)
+        self.ask_service = ChatService(ask_page, self, site=self.site, view=self.ask_browser)
 
         self.new_chat_btn.clicked.connect(self._open_new_chat)
         self.reload_btn.clicked.connect(self.browser.reload)
@@ -101,9 +116,24 @@ class ClaudeChatView(QWidget):
         self.browser.loadFinished.connect(self._on_load_finished)
 
         self.browser.load(QUrl(self.site.home))
+        self.ask_browser.load(QUrl(self.site.home))
 
-    def _new_page(self) -> QWebEnginePage:
-        page = QWebEnginePage(chat_web_profile(self.site.key), self.browser)
+    @staticmethod
+    def _pane(title: str, view: QWidget, min_width: int) -> QWidget:
+        box = QWidget()
+        box.setMinimumWidth(min_width)
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        caption = muted_label(title)
+        caption.setContentsMargins(10, 6, 10, 6)
+        lay.addWidget(caption)
+        lay.addWidget(view, stretch=1)
+        return box
+
+    def _new_page(self, parent: QWidget) -> QWebEnginePage:
+        # Both pages use the one profile of this site: one sign-in, shared by the two.
+        page = QWebEnginePage(chat_web_profile(self.site.key), parent)
         page.proxyAuthenticationRequired.connect(self._on_proxy_auth)
         return page
 
@@ -117,7 +147,12 @@ class ClaudeChatView(QWidget):
         return self.browser.page()
 
     def chat_service(self) -> ChatService:
+        """The page that writes resumes."""
         return self.service
+
+    def question_service(self) -> ChatService:
+        """The page that answers application-form questions."""
+        return self.ask_service
 
     def _open_new_chat(self) -> None:
         self.browser.load(QUrl(self.site.new_chat))
@@ -132,11 +167,15 @@ class ClaudeChatView(QWidget):
                           "You will need to sign in again."):
             return
         clear_chat_browser_data(self.site.key)
-        page = self._new_page()
+        page = self._new_page(self.browser)
         self.browser.setPage(page)
-        self.service = ChatService(page, self, site=self.site)
+        self.service = ChatService(page, self, site=self.site, view=self.browser)
         self.service.activity.connect(self._on_activity)
+        ask_page = self._new_page(self.ask_browser)
+        self.ask_browser.setPage(ask_page)
+        self.ask_service = ChatService(ask_page, self, site=self.site, view=self.ask_browser)
         self.browser.load(QUrl(self.site.home))
+        self.ask_browser.load(QUrl(self.site.home))
         self.status_label.setText(C.CLAUDE_STATUS_SIGNED_OUT)
         self.session_cleared.emit()
         show_info(self, f"Clear {label} session", f"{label} session cleared.")

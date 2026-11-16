@@ -30,9 +30,16 @@ class Question:
     options: list[str] = field(default_factory=list)
     max_chars: int = 0  # 0 = no stated limit
     kind: str = "text"  # text | choice | number
+    hint: str = ""  # added to the prompt, e.g. when the first answer was not one of the options
+    extra: dict = field(default_factory=dict)  # kind "salary": the facts the prompt states (see core.salary_answer)
+    figure: int = 0  # kind "salary" with options: the yearly figure the option must contain
 
 
 def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER_PROMPT) -> str:
+    if question.kind == "salary":
+        from core.salary_answer import build_salary_prompt  # late: salary_answer imports this module
+
+        return build_salary_prompt(question.extra, question.text, question.options or None, question.figure)
     lines = [
         style_prompt.strip() or DEFAULT_ANSWER_PROMPT,
         "",
@@ -44,6 +51,8 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
     if question.options:
         lines.append("Choose exactly one of these options and reply with it word for word: "
                      + json.dumps(question.options, ensure_ascii=False))
+    if question.hint:
+        lines.append(question.hint.strip())
     if question.kind == "number":
         lines.append("Reply with a single number only.")
     if question.max_chars:
@@ -122,11 +131,27 @@ def clean_answer(text: str, max_chars: int = 0) -> str:
     return out.strip()
 
 
+_DASHES = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")  # hyphen, en dash, em dash, minus ...
+_LESS = re.compile(r"\b(?:less than|fewer than|under|below)\s*")
+_MORE = re.compile(r"\b(?:more than|greater than|over|above)\s*")
+
+
+def _canon(text: str) -> str:
+    """A choice's wording with the differences that do not change its meaning removed: case, spacing, the kind of
+    dash ("3-5" against "3 en-dash 5"), "3 - 5", and "less than 3" against "< 3"."""
+    out = _DASHES.sub("-", (text or "").strip().casefold())
+    out = re.sub(r"\s*-\s*", "-", out)
+    out = _LESS.sub("<", out)
+    out = _MORE.sub(">", out)
+    out = re.sub(r"([<>])\s+", r"\1", out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def match_option(answer: str, options: list[str]) -> str:
-    """The option the answer names (exact, then case/space-insensitive, then contained), else ''."""
+    """The option the answer names (exact, then case/space/dash-insensitive, then contained), else ''."""
     if not options:
         return answer
-    norm = lambda s: re.sub(r"\s+", " ", s.strip().casefold())  # noqa: E731
+    norm = _canon
     target = norm(answer)
     for opt in options:
         if norm(opt) == target:

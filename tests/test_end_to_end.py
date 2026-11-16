@@ -95,7 +95,7 @@ def test_a_job_found_on_jobright_ends_up_applied_to_and_recorded(tmp_path):
         (sent,) = board.submissions
         assert sent["email"] == "mary@example.com" and sent["resume"] == "Mary_Resume.pdf"
         assert sent["question_5"] == "Built retrieval pipelines in production."
-        assert sent["gender"] == "Decline To Self Identify"
+        assert not sent["gender"]  # an optional question: left blank, not even answered with "Decline"
         # the question went to the job's own conversation, with the job context ready in case it had to start a new one
         prompt, kw = questions[0]
         assert "RAG" in prompt and kw["chat_url"].endswith("aaaaaaaa-2222-3333-4444-555555555555")

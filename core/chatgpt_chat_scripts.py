@@ -25,6 +25,13 @@ _COMMON = (
     if (!c) return '';
     return (c.value !== undefined && c.tagName === 'TEXTAREA') ? c.value : (c.innerText || c.textContent || '');
   }
+  function pastedCards(c) {
+    if (!c) return 0;
+    const form = c.closest('form') || (c.parentElement && c.parentElement.parentElement && c.parentElement.parentElement.parentElement);
+    if (!form) return 0;
+    return Array.from(form.querySelectorAll('*')).filter(
+      e => e.children.length === 0 && /^pasted text$/i.test((e.textContent || '').trim())).length;
+  }
   function conversationRoot() {
     return document.querySelector('main, [role="main"]') || document.body;
   }
@@ -191,6 +198,8 @@ CHATGPT_PAGE_STATE_JS = (
     replyText: clipText(last || pickBestReply(candidates)),
     canSend: !!composer && !!sendBtn,
     composerLength: composerText(composer).length,
+    // ChatGPT turns a long paste into a "Pasted text" card above the box and leaves the box itself empty
+    attachments: pastedCards(composer),
     url: location.href
   });
 })()

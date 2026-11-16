@@ -150,3 +150,52 @@ def test_work_history_goes_into_the_resume_prompt_and_foreign_employers_are_reje
     assert employers_outside_history(bad, "") == []  # no history set: nothing to compare with
     with pytest.raises(ResumeError, match="not a truthful resume"):
         finalize_resume_object(dict(bad, name="x"), s)
+
+
+def test_an_empty_message_box_is_not_a_paste_but_a_pasted_text_card_is():
+    from ui.chat_service import ChatService
+    holds = ChatService._box_holds_paste
+    assert not holds({"composerLength": 1, "attachments": 0})      # an empty box reads as one blank line
+    assert holds({"composerLength": 0, "attachments": 1})          # a long paste becomes a card, box text stays empty
+    assert holds({"composerLength": 900, "attachments": 0})
+    assert ChatService._composer_length({"composerLength": 0, "attachments": 2}) >= 10**6
+
+
+def test_a_choice_is_matched_whatever_kind_of_dash_or_wording_the_form_and_the_chat_use():
+    from core.chat_questions import match_option
+
+    options = ["< 3 years", "3–5 years", ">5+ years"]  # the form uses a typographic en dash
+    for answer in ("3-5 years", "3 - 5 years", "3–5 years", "3-5", "3 — 5 years"):
+        assert match_option(answer, options) == "3–5 years", answer
+    assert match_option("Less than 3 years", options) == "< 3 years"
+    assert match_option("5+ years", options) == ">5+ years"
+    assert match_option("4 years", options) == ""  # not one of them: never guessed
+
+
+def test_the_chat_is_asked_once_more_when_its_answer_is_not_one_of_the_options():
+    from core.form_answers import FILL, NEEDS, Context, Field, Option
+    from core.greenhouse import GreenhouseApplier
+    from core.settings_store import ProfileSettings
+
+    asked = []
+
+    def chat(question):
+        asked.append(question)
+        return "about four years" if len(asked) == 1 else "3–5 years"
+
+    field = Field(ref="q", kind="combobox", label="Years with Terraform?", required=True,
+                  options=[Option("< 3 years"), Option("3–5 years"), Option(">5+ years")])
+    ctx = Context(profile=ProfileSettings(name="Mary Berg"), chat_enabled=True)
+    decision = GreenhouseApplier(answer=chat)._ask(field, ctx)
+    assert (decision.action, decision.value, decision.source) == (FILL, "3–5 years", "chat")
+    assert len(asked) == 2 and "about four years" in asked[1].hint and "copied character for character" in asked[1].hint
+    from core.chat_questions import build_question_prompt
+
+    assert "about four years" in build_question_prompt(asked[1])
+
+    # a chat that keeps answering outside the list ends as needs-you, with the first answer in the reason
+    stubborn = GreenhouseApplier(answer=lambda q: "a few years")._ask(field, ctx)
+    assert stubborn.action == NEEDS and "a few years" in stubborn.reason
+    # an optional question it cannot answer is simply skipped
+    optional = Field(ref="o", kind="combobox", label="Years?", required=False, options=field.options)
+    assert GreenhouseApplier(answer=lambda q: "a few years")._ask(optional, ctx).action == "skip"

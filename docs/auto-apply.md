@@ -4,24 +4,38 @@ Auto Apply finds new jobs on Jobright, has your resume chat (Claude or ChatGPT) 
 Greenhouse by itself. It is built to stop and tell you rather than guess.
 
 ```
-Jobright (every ~10 min)  ->  keep Greenhouse links  ->  Job Queue  ->  resume + cover letter (your chat)
+Jobright (every ~hour)  ->  keep Greenhouse links  ->  Job Queue  ->  resume + cover letter (your chat)
                                                                           |
         Applications / Analytics  <-  "applied" only after a confirmation page  <-  fill, check, send
 ```
 
 ## What it does, step by step
 
-1. **Find.** Every 8-12 minutes (a random gap, never a fixed clock) the bot reads your Jobright list in the bot browser.
-   Your filters live in your Jobright account; the bot reads whatever that list shows, newest first, and stops at the
-   first screen with nothing new. Only postings from the last day (setting) are kept. The list carries the employer's
-   apply link. Only a Greenhouse link (or a company page that embeds Greenhouse) is opened on Jobright, and that page
-   is read the same way the extension reads it: title, company, salary and the full sectioned description.
+1. **Find.** Once an hour (a random gap of 48-72 minutes, never a fixed clock; the interval is a setting) the bot reads
+   your Jobright list in the bot browser. Your filters live in your Jobright account; the bot reads whatever that list
+   shows, newest first, and stops at the first screen with nothing new. Only postings from the last day (setting) are
+   kept. The list carries the employer's apply link. Only a Greenhouse link (or a company page that embeds Greenhouse)
+   is opened on Jobright, and that page is read the same way the extension reads it: title, company, salary and the
+   full sectioned description.
+
+   **One batch per hour, freshest first.** At most 20 new jobs are queued per hour (*Queue at most, per hour* in
+   Settings; for a different interval the batch is scaled to match). The postings are taken newest first, and a page
+   is opened only until the batch is full. A good posting that did not fit is recorded as "Over this batch's limit" and
+   is **not** kept for a later batch: an hour later it would be old news. Jobs of the previous batch that are still
+   waiting for their resume when a batch with something fresher arrives are dropped too: they stay in the queue as
+   *Skipped* with the reason "Expired", so you can see them. If nothing fresher arrives, nothing is dropped. Resumes
+   are written freshest posting first (jobs you add by hand go before them), and applications are sent freshest
+   posting first, so the newest jobs are always applied to first.
 2. **Sort.** Other domains are kept in *Found on Jobright* (marked "Other site") without opening the Jobright page, and
    they are **never generated**. A list row with no apply link is opened only to find that link; if it is not Greenhouse
-   the text is discarded. Duplicates, blocked companies, title words you reject, and companies you already applied to
-   are dropped without a visit.
+   the text is discarded. Duplicates, blocked companies, title words you reject, companies you already applied to,
+   companies whose folder already exists, and companies that already have a job in the queue (or earlier in the same
+   batch) are dropped without a visit, so a job that would only be skipped later never takes a place in the batch.
 3. **Write.** New jobs enter the normal queue and the existing pipeline writes the resume and cover letter. The address
-   of the chat conversation is saved on the job.
+   of the chat conversation is saved on the job. The Chat tab shows two pages of the same account side by side
+   (one sign-in): **Resumes** writes the documents and **Application questions** answers the questions of forms
+   being filled, so neither waits for the other. They take turns only for the few seconds it takes to paste a prompt
+   (the clipboard is shared).
 4. **Apply.** The bot opens the form, reads every field and decides each answer *before* touching it:
 
    | Kind of question | Answered from |
@@ -29,7 +43,8 @@ Jobright (every ~10 min)  ->  keep Greenhouse links  ->  Job Queue  ->  resume +
    | Name, email, phone, links, location, work authorization, sponsorship | Settings -> personal information (also editable on the *Your answers* tab) |
    | Current employer, job title, school, degree | The resume written for that job and your profile: never typed twice |
    | Years of experience (total, or with one skill) | The chat, which reads the resume (a date calculation from the resume is the fallback) |
-   | Salary, notice period, relocation, how you heard, etc. | *Your answers* tab (facts only you know) |
+   | Salary and salary ranges | One figure per job, inside the job's own posted range (see *Salary* below) |
+   | Notice period, relocation, how you heard, etc. | *Your answers* tab (facts only you know) |
    | Multiple-choice "how many years with X" questions | The chat picks one of the form's own options |
    | Gender, race, veteran, disability, orientation | Your choice, **Decline by default** |
    | "Privacy notice" / "I certify" boxes | Ticked only if you allow it; text-message consent defaults to **no** |
@@ -38,10 +53,56 @@ Jobright (every ~10 min)  ->  keep Greenhouse links  ->  Job Queue  ->  resume +
 
    Legal and personal questions (convictions, current salary, immigration status, date of birth, and similar) are never
    sent to a chat, even when a chat is available.
+
+   **Salary.** Every job has its own figure, not one saved number. The limits are facts: the pay range the posting
+   shows (or one stated in the job description) and *Minimum salary I accept* in Settings (default $80,000 a year).
+   The chat that wrote the resume is asked once for a single figure and aims at the lower-middle of the range, 40-55% of
+   the way from the low end to the high end (*Salary to ask for*), so the number gets replies and never looks like a
+   stretch. The figure is then kept inside the limits (never above the posted maximum, never below your minimum) and
+   written the way each question needs: digits, "$112,000", a low-high range, an hourly rate, or the option of a
+   dropdown that holds it. The same figure is used for every salary question of the form. With no posted range the chat
+   estimates a typical figure, never below your minimum; if the chat cannot be reached the figure is worked out from the
+   band, or taken from *Expected salary* under *Your answers*. The record shows how the figure was reached (for example
+   "Posted $100,000 - $110,000; aimed at 50% of the range"). Current salary and salary history are never answered.
+
+   **Jobs that pay too little are not queued.** At discovery, a job whose posted pay clearly tops out below your minimum
+   is left out and counted under "pay below your minimum" (setting: *Skip jobs whose posted pay tops out below my minimum
+   salary*). When the pay is missing, unclear (no unit, "$60K+") or not in dollars, the job is kept.
+
+   **Optional questions are left blank.** A question the form does not require is not answered at all: it is not
+   asked of the chat and not filled from your profile, since the form accepts it empty. Required questions are
+   answered as above, and the resume and cover letter are still attached (they are files, not questions). If a form
+   turns out to need a field it did not mark as required, the site rejects the send, the application stops under
+   *Needs you*, and the reason lists the questions that were left blank. The setting is *Leave questions blank when
+   the form does not require them* (Settings -> Auto apply; on by default).
 5. **Check, then send.** The filled form is read back; if a required field is empty the application is held. Only then
    is *Submit* pressed. Greenhouse's emailed security code is read from Outlook (in the bot browser) and entered.
 6. **Record.** "Applied" is recorded only after a confirmation page is seen, with a screenshot and every answer given.
-   If no confirmation appears, the job is held for you rather than marked either way.
+   If no confirmation appears, the job is held for you rather than marked either way. For every sent application the
+   questions and answers are also written, in full, to `Application answers.txt` in the job's folder: each question,
+   the answer, and where it came from (your profile, your saved answers, a built-in rule, or **written by the chat**,
+   which is the one to review), then the optional questions left blank.
+
+## Reports to Telegram
+
+With a Telegram bot token and chat id in Settings (and *Also send status reports* ticked), the app sends one message
+for each event. Each kind has its own icon and heading, so they can be told apart at a glance:
+
+| Message | Heading | Says |
+| --- | --- | --- |
+| Job search (every cycle) | 🔎 **JOB SEARCH** | jobs listed and recent; Greenhouse and other sites; queued; the jobs left out and why (company already applied to, folder exists, another job at the company queued, block list, title words, same posting, over the hour's limit); old jobs dropped |
+| Resume | 📄 **RESUME READY** / ❌ **RESUME FAILED** / ⏭ **RESUME SKIPPED** | the job, and the reason when it failed or was skipped |
+| Application | ✅ **APPLIED** / ❌ **APPLICATION FAILED** / 🚫 **POSTING CLOSED** / 🧪 **DRY RUN** | the job, a link to the posting, a summary line, and for a sent application **its questions and answers inside the same message** |
+| The app needs you | 🙋 **NEEDS YOU** / ⚠️ | what stopped it and why |
+
+In an *Applied* message the questions and answers sit in a collapsed quote (tap to open). Each answer is marked with
+where it came from: 👤 your profile, 💾 your saved answers, ⚙️ a built-in rule, 🤖 written by the chat (the ones worth a
+look). Optional questions left blank are listed at the end. If the answers are too long for one message, the same
+message is sent as a file with the result as its caption.
+
+Your contact details, demographic and legal answers and pay are shown as 🔒 *kept private*; the full record stays on
+this computer (`Application answers.txt` in the job's folder). A Telegram chat with a bot is not end-to-end encrypted,
+which is why. Links never unfold into a preview card.
 
 ## Modes (Auto Apply page)
 

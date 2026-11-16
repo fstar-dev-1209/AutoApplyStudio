@@ -11,6 +11,7 @@ from typing import Any, Callable
 from core.claude_client import ChatPageBlocked, ClaudeClient, ClaudeError
 from core import ats, jobright
 from core.company_match import applied_matches, same_company
+from core.job_order import generation_order, posting_times
 from core.salary import parse_salary
 from core.prompt_builder import build_claude_chat_prompt
 from core.settings_store import GENERATION_CLAUDE_API
@@ -71,8 +72,8 @@ class QueueEngine:
         self._attempts: dict[str, int] = {}
         self._no_auto_retry: set[str] = set()
         self.retry_pause_seconds = 0.0  # the app sets 20: before the 1st automatic retry, twice that before the 2nd
-        self.hold_generation: Callable[[], bool] = lambda: False  # True while a form question wants the chat
         self._fresh_chat_next: set[str] = set()  # jobs whose last reply was rejected: the retry must not re-read it
+        self.reporter = None  # core.reports.Reporter, set by the app: told how each job's resume went
 
     @property
     def state(self) -> WorkerState:
@@ -229,24 +230,12 @@ class QueueEngine:
             time.sleep(0.1)
         return not self._stop.is_set()
 
-    def _yield_to_questions(self, limit_sec: float = 1200) -> None:
-        """Let an open application form have the chat first. A form waiting for an answer is a job one step from
-        being sent; the next resume can wait a minute. Never waits forever."""
-        deadline = time.monotonic() + limit_sec
-        while not self._stop.is_set() and time.monotonic() < deadline:
-            try:
-                if not self.hold_generation():
-                    return
-            except Exception:  # noqa: BLE001 - a broken hook must not stop the queue
-                return
-            time.sleep(1)
-
     def _next_runnable(self) -> JobItem | None:
-        self._yield_to_questions()
-        for job in self.store.jobs():
-            if job.status == JobStatus.QUEUED:
-                return job
-        return None
+        waiting = [job for job in self.store.jobs() if job.status == JobStatus.QUEUED]
+        if not waiting:
+            return None
+        # Jobs added by hand first, then the freshest posting: an old job is only reached when nothing newer waits.
+        return generation_order(waiting, posting_times(self.store.database))[0]
 
     def _run_loop(self) -> None:
         try:
@@ -256,6 +245,10 @@ class QueueEngine:
                 job = self._next_runnable()
                 if job is None:
                     break
+                live = self.store.get(job.id)
+                if live is None or live.status != JobStatus.QUEUED:
+                    continue  # dropped or changed since it was picked (a newer batch replaced it)
+                job = live
                 self._current_id = job.id
                 self._emit("job_started", job_id=job.id)
                 try:
@@ -649,6 +642,11 @@ class QueueEngine:
         job = self.store.get(job_id)
         if job is None:
             return
+        if self.reporter is not None:
+            try:
+                self.reporter.resume(job)
+            except Exception:  # noqa: BLE001 - a report must never stop the queue
+                pass
         if job.status == JobStatus.DONE:
             self.store.add_event(job_id, "docs_generated", {"files": job.generated_files})
         elif job.status == JobStatus.FAILED:

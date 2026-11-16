@@ -29,7 +29,7 @@ def test_an_alert_goes_to_the_app_discord_and_telegram():
     urls = [str(r.url) for r in sent]
     assert HOOK in urls and "https://api.telegram.org/bot123:ABC/sendMessage" in urls
     discord = next(r for r in sent if str(r.url) == HOOK)
-    assert b"Needs you: Acme" in discord.content and b"Which office?" in discord.content
+    assert b"NEEDS YOU" in discord.content and b"Acme" in discord.content and b"Which office?" in discord.content
     telegram = next(r for r in sent if "telegram" in str(r.url))
     assert b"chat_id=555" in telegram.content
 
