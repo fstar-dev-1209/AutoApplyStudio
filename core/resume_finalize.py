@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from core.json_extract import find_placeholder
@@ -32,6 +33,19 @@ def employers_outside_history(resume_obj: dict[str, Any] | None, work_history: s
             out.append(name)
     return out
 
+_SUBTITLE_LABEL = re.compile(
+    r"^\s*UNIVERSITY TEACHING SAMPLE\s+—\s+HYPOTHETICAL CANDIDATE\s*\|\s*",
+    re.I,
+)
+
+
+def clean_subtitle(subtitle: str, candidate_name: str = "") -> str:
+    """Remove the leading 'UNIVERSITY TEACHING SAMPLE — HYPOTHETICAL CANDIDATE | '
+    prefix from the subtitle."""
+    if not subtitle:
+        return subtitle
+
+    return _SUBTITLE_LABEL.sub("", subtitle, count=1)
 
 def finalize_resume_object(
     resume_obj: dict[str, Any],
@@ -62,6 +76,8 @@ def finalize_resume_object(
         resume_obj["role_title"] = role_title
     if job_url and not str(resume_obj.get("job_link") or "").strip():
         resume_obj["job_link"] = job_url
+    if isinstance(resume_obj.get("subtitle"), str):
+        resume_obj["subtitle"] = clean_subtitle(resume_obj["subtitle"], profile.name)
     for key_name, value in (
         ("name", profile.name),
         ("email", profile.email),
