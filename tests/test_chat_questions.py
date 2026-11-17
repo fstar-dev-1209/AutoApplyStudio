@@ -199,3 +199,82 @@ def test_the_chat_is_asked_once_more_when_its_answer_is_not_one_of_the_options()
     # an optional question it cannot answer is simply skipped
     optional = Field(ref="o", kind="combobox", label="Years?", required=False, options=field.options)
     assert GreenhouseApplier(answer=lambda q: "a few years")._ask(optional, ctx).action == "skip"
+
+
+from core.chat_questions import salvage_unmarked  # noqa: E402
+
+
+def test_facts_go_into_the_question_and_the_context():
+    q = Question("Are you a U.S. citizen?", options=["Yes", "No"], kind="choice", facts="- Work status (text): US citizen")
+    prompt = build_question_prompt(q)
+    assert "MY PERSONAL FACTS" in prompt and "US citizen" in prompt and prompt.index("MY PERSONAL FACTS") < prompt.index("Question:")
+    assert "MY PERSONAL FACTS" not in build_question_prompt(Question("Why us?"))
+    ctx = build_context_prompt(job_description="jd", resume_json=None, company="A", role="B", facts="- Name: X")
+    assert "- Name: X" in ctx
+
+
+def test_a_reply_without_markers_is_used_when_it_names_exactly_one_option():
+    asked = ("Question: Are you able to meet the requirements?\nReply with ONLY the answer between the markers "
+             "[[ANSWER_START]] and [[ANSWER_END]], with nothing before or after them. Plain text only: no markdown, "
+             "no mention of being an AI.\n")
+    assert salvage_unmarked(asked + "Yes", ["Yes", "No"]) == "Yes"
+    assert salvage_unmarked(asked + "I would say **No**, because...", ["Yes", "No"]) == "No"
+    assert salvage_unmarked(asked + "Yes, or maybe no", ["Yes", "No"]) == ""  # two options: not settled
+    assert salvage_unmarked(asked + "Yes - OPT", ["Yes", "Yes - OPT", "No"]) == "Yes - OPT"
+    assert salvage_unmarked(asked, ["Yes", "No"]) == ""  # only our own question is on the page
+    assert salvage_unmarked(asked + "about 7", [], "number") == "7"
+
+
+def test_every_question_carries_the_facts_and_an_unmarked_reply_is_still_taken():
+    from types import SimpleNamespace
+
+    from core.apply_answers import make_answer_fn
+
+    seen, logged = [], []
+
+    def ask(prompt, *, chat_url, context_prompt, timeout_sec):
+        seen.append((prompt, context_prompt))
+        tail = prompt[-400:] + "\nNo."
+        return SimpleNamespace(answer="", error="ChatGPT answered without the answer markers.", chat_url="", raw=tail)
+
+    job = SimpleNamespace(job_description="jd", resume_json={}, company="A", role_title="B", chat_url="")
+    answer = make_answer_fn(job, ask, facts_text="- Work status (text): US citizen", log=logged.append)
+    got = answer(Question("Are you a citizen?", options=["Yes", "No"], kind="choice"))
+    assert got == "No"
+    assert "US citizen" in seen[0][0] and "US citizen" in seen[0][1]
+    assert any("no markers" in m for m in logged)
+
+
+from core.chat_questions import answer_after_prompt  # noqa: E402
+
+_PROMPT = ('Write it by hand.\n\nQuestion: Are you okay showing your ID during the first Interview?\n'
+           'Choose exactly one of these options and reply with it word for word: ["Yes", "No"]\n\n'
+           'Reply with ONLY the answer between the markers [[ANSWER_START]] and [[ANSWER_END]], with nothing before or '
+           'after them. Plain text only: no markdown, no mention of being an AI.')
+
+
+def test_the_answer_after_our_question_is_found_even_when_the_same_word_was_said_before():
+    older = "ChatGPT said:\n\n[[ANSWER_START]]Yes[[ANSWER_END]]\n\n"
+    page = older + "You said:\n" + _PROMPT + "\n…\nShow more\nChatGPT said:\n\n[[ANSWER_START]]No[[ANSWER_END]]\n\nChatGPT can make mistakes."
+    assert answer_after_prompt(page, _PROMPT) == "No"
+    # our message is on the page but the reply has not started: the earlier answer is not ours
+    assert answer_after_prompt(older + "You said:\n" + _PROMPT, _PROMPT) == ""
+
+
+def test_a_long_question_shown_cut_short_is_still_found_by_its_question_line():
+    page = ("ChatGPT said:\n\n[[ANSWER_START]]Yes[[ANSWER_END]]\n\nYou said:\nWrite it by hand. MY PERSONAL FACTS ... "
+            "Question: Are you okay showing your ID during the first Interview?\n…\nShow more\n"
+            "ChatGPT said:\n\n[[ANSWER_START]]No[[ANSWER_END]]")
+    assert answer_after_prompt(page, _PROMPT) == "No"
+
+
+def test_an_earlier_question_and_its_answer_are_never_taken_for_ours():
+    earlier = _PROMPT.replace("Are you okay showing your ID during the first Interview?", "Can you work weekends?")
+    page = "You said:\n" + earlier + "\nChatGPT said:\n\n[[ANSWER_START]]Yes[[ANSWER_END]]\n"
+    assert answer_after_prompt(page, _PROMPT) == ""  # our question has not appeared yet
+
+
+def test_a_reply_the_reader_missed_is_still_taken_from_the_end_of_the_page():
+    raw = (_PROMPT[-300:] + "\n…\nShow more\nChatGPT said:\n\n[[ANSWER_START]]Yes[[ANSWER_END]]\n\nChatGPT can make mistakes.")
+    assert salvage_unmarked(raw, ["Yes", "No"]) == "Yes"
+    assert salvage_unmarked(raw, ["Maybe", "No"]) == ""  # an answer that is not an option is not taken

@@ -954,6 +954,13 @@ class MainWindow(QMainWindow):
             if not ok:
                 raise ClaudeError("Could not start Claude on the UI thread.")
             if not self._claude_begin_deferred:
+                if (self._claude_wait_error.startswith("Another chat page is pasting")
+                        and time.monotonic() < deadline):
+                    # the other page took the clipboard a moment after this one checked: wait for it and start again
+                    self._claude_wait_error = ""
+                    self._claude_wait.clear()
+                    time.sleep(2)
+                    continue
                 break
             if time.monotonic() > deadline:
                 raise ClaudeError(f"{self.chat_label} stayed busy pasting another message.")

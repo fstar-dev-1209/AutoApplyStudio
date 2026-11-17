@@ -626,3 +626,96 @@ def test_a_question_the_form_does_not_require_is_skipped_when_blanks_are_allowed
     assert decide(cover, skip).action == FILL  # attachments are not questions: the cover letter is still sent
     chat_question = Field(ref="d", kind="textarea", label="Why do you want to work here?", required=False)
     assert decide(chat_question, Context(profile=profile, chat_enabled=True, skip_optional=True)).action == SKIP
+
+
+TRIPLE_WHALE = ("By submitting your application, you consent to Triple Whale collecting and using your personal data for "
+                "purposes related to recruitment, organizational planning on a global scale, and other relevant activities.")
+
+
+def test_a_consent_notice_is_not_mistaken_for_a_question_about_relatives():
+    assert classify(TRIPLE_WHALE) == "agree_consents"
+    assert classify("Are you related to anyone who works at Acme?") == "has_relatives"
+
+
+def test_a_consent_list_with_one_acceptance_option_gets_that_option():
+    field = choice(TRIPLE_WHALE, ["Accept"], kind="combobox")
+    d = decide(field, ctx())
+    assert (d.action, d.value) == (FILL, "Accept")
+
+
+def test_the_single_option_is_still_taken_if_the_question_is_misread():
+    odd = choice("You consent to us keeping your details", ["Accept"], kind="combobox")
+    assert decide(odd, ctx(facts={"has_relatives": "No", "agree_consents": "No"})).action == NEEDS  # "No" is never forced to "Accept"
+    from core.form_answers import _only_acknowledgement
+    assert _only_acknowledgement(odd).label == "Accept"
+    assert _only_acknowledgement(choice("Which office?", ["Accept"])) is None
+
+
+def _chat_ctx(**kw):
+    return ctx(chat_enabled=True, **kw)
+
+
+def test_an_answer_that_matches_no_option_goes_to_the_chat_instead_of_stopping():
+    sponsorship = choice("Do you require sponsorship?", ["I will not require sponsorship", "Yes - OPT", "Other sponsorship required"])
+    assert decide(sponsorship, ctx()).action == NEEDS  # no chat: nothing to ask
+    assert decide(sponsorship, _chat_ctx()).action == CHAT
+    # a voluntary demographic list never goes to the chat
+    assert decide(choice("Gender", ["Man", "Woman"]), _chat_ctx()).action != CHAT
+
+
+def test_a_question_about_two_things_goes_to_the_chat_with_its_options():
+    two = choice("Are you eligible to work in the United States and do you need sponsorship now or later?", ["Yes", "No"])
+    assert decide(two, ctx()).action == NEEDS
+    assert decide(two, _chat_ctx()).action == CHAT
+
+
+def test_citizenship_is_asked_to_the_chat_which_is_given_your_facts():
+    citizen = choice("Are you currently a U.S. citizen?", ["Yes", "No"])
+    assert decide(citizen, ctx()).action == NEEDS
+    assert decide(citizen, _chat_ctx()).action == CHAT
+    # other sensitive questions are still never handed over
+    assert decide(choice("Have you ever been convicted of a felony?", ["Yes", "No"]), _chat_ctx()).action == NEEDS
+
+
+def test_authorization_in_the_country_where_you_live_is_not_the_country_field():
+    label = "Your authorization to work in the country where you live:"
+    assert classify(label) == "work_authorization"
+    assert classify("Country") == "country"
+
+
+def test_a_full_state_name_picks_the_abbreviation_in_the_list():
+    state = choice("State", ["AL", "FL", "GA"], kind="combobox")
+    d = decide(state, ctx(facts={"state": "Florida"}))
+    assert (d.action, d.value) == (FILL, "FL")
+
+
+def test_work_history_dates_come_from_the_resume_and_a_number_box_never_gets_words():
+    resume = {"experience": [{"company": "Acme", "title": "Engineer", "dates": "Jun 2023 - Sep 2026"}]}
+    year = Field(ref="y", kind="number", label="Start date year", required=True, input_type="number")
+    d = decide(year, ctx(resume=resume))
+    assert (d.action, d.value) == (FILL, "2023")
+    assert decide(Field(ref="y", kind="number", label="End date year", required=True, input_type="number"),
+                  ctx(resume=resume)).value == "2026"
+    month = Field(ref="m", kind="number", label="Start date month", required=True, input_type="number")
+    assert decide(month, ctx(resume=resume)).value == "6"
+    # a start date that is really "when can you start" must not put words into a number box
+    no_dates = decide(Field(ref="y", kind="number", label="Start date year", required=True, input_type="number"), ctx())
+    assert no_dates.action == NEEDS
+    words = Field(ref="n", kind="number", label="Notice period", required=True, input_type="number")
+    assert decide(words, ctx(facts={"notice_period": "2 weeks"})).action == NEEDS
+
+
+def test_your_facts_are_written_for_the_chat():
+    from core.personal_facts import personal_facts_text
+
+    text = personal_facts_text(PROFILE, {"visa_status": "US citizen", "salary_expectation": "$150,000", "eeo_gender": "Decline"},
+                               {"are you eligible to work": "Yes"})
+    assert "US citizen" in text and "Austin, TX" in text and "Legally authorized" in text
+    assert "150,000" not in text  # the salary has its own rules
+    assert "are you eligible to work" in text
+    assert "Gender" not in text and "prefers not to say" not in text  # demographic answers never go to the chat
+
+
+def test_an_earliest_start_date_question_is_not_a_work_history_date():
+    assert classify("When is your earliest start date? (month/year)") == "notice_period"
+    assert classify("Start Date - Year*") == "history_start_year"

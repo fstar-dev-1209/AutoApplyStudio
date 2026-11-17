@@ -429,3 +429,12 @@ def test_the_form_filler_is_given_the_jobs_own_pay_and_your_salary_rules(env):
     assert (pay.low, pay.high, pay.period, pay.floor) == (100_000, 130_000, "year", 95_000)
     assert (pay.band_low, pay.band_high, pay.fallback) == (30, 50, "$140,000")
     assert pay.aim() == 110_000  # 40% of the way from 100K to 130K is 112K, tidied to the nearest 5K
+
+
+def test_trying_a_closed_posting_by_hand_does_not_reopen_it(env):
+    job = env.job(1)
+    env.outcomes = [ApplyOutcome(EXPIRED, "The posting is closed.")]
+    env.tick()
+    calls = len(env.calls)
+    env.runner.request_now(job.id, submit=True)
+    assert env.tick() is None and len(env.calls) == calls

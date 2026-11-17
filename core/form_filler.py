@@ -45,10 +45,26 @@ def fill_field(page, f: Field, d: Decision, files: Files, *, pause: Pause = _sle
         raise FillError(f"{f.label or f.ref}: {type(exc).__name__}: {str(exc).splitlines()[0][:160]}") from exc
 
 
+def _click(box, timeout: int = 8000) -> None:
+    """A click that survives something covering the field for a moment (a cookie bar, a chat bubble): the same click
+    forced through, and if that fails too, the field is focused so typing still lands in it."""
+    try:
+        box.click(timeout=timeout)
+    except Exception:  # noqa: BLE001
+        try:
+            box.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            box.click(timeout=3000, force=True)
+        except Exception:  # noqa: BLE001
+            box.focus(timeout=3000)
+
+
 def _fill_text(page, f: Field, d: Decision, files: Files, pause: Pause) -> None:
     box = _loc(page, f.ref)
     box.scroll_into_view_if_needed(timeout=8000)
-    box.click(timeout=8000)
+    _click(box, 8000)
     value = d.value[: f.max_chars] if f.max_chars else d.value
     if len(value) <= 40:
         box.fill("")
@@ -59,7 +75,7 @@ def _fill_text(page, f: Field, d: Decision, files: Files, pause: Pause) -> None:
     got = box.input_value(timeout=3000)
     if _squash(got) != _squash(value):
         # a page that re-drew the field mid-typing loses the keys: put the whole answer in again, once
-        box.click(timeout=8000)
+        _click(box, 8000)
         box.fill(value)
         pause(0.2, 0.5)
         got = box.input_value(timeout=3000)
@@ -249,7 +265,7 @@ def _fill_combobox(page, f: Field, d: Decision, files: Files, pause: Pause) -> N
         # The suggestions come over the network. Behind a slow proxy the first lookup sometimes returns nothing in
         # time, so the text is typed once more and given longer before the field is reported as unanswerable.
         for wait_ms in (2500, 9000):
-            box.click(timeout=4000)
+            _click(box, 4000)
             box.press("Control+A")
             box.press("Backspace")
             box.press_sequentially(query[:40], delay=random.randint(35, 70))  # type-ahead (the city of "Austin, TX")

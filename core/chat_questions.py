@@ -33,6 +33,7 @@ class Question:
     hint: str = ""  # added to the prompt, e.g. when the first answer was not one of the options
     extra: dict = field(default_factory=dict)  # kind "salary": the facts the prompt states (see core.salary_answer)
     figure: int = 0  # kind "salary" with options: the yearly figure the option must contain
+    facts: str = ""  # the personal facts block (core.personal_facts): true, and never to be contradicted
 
 
 def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER_PROMPT) -> str:
@@ -45,9 +46,20 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
         "",
         "This is a question from the application form for THIS job. Use the job description and the resume JSON "
         "from earlier in this conversation.",
-        "",
-        f"Question: {question.text.strip()}",
     ]
+    if question.facts.strip():
+        lines += [
+            "",
+            "MY PERSONAL FACTS (they are true, they come from my own settings, and they outrank everything else; never "
+            "contradict them):",
+            question.facts.strip(),
+            "",
+            "For questions about work eligibility, citizenship, sponsorship, location, availability or consent, answer "
+            "ONLY from these facts. If a question asks several things at once, choose the option that is true for all of "
+            "them. If the facts do not cover it, choose the most truthful option that does not overstate me. Never "
+            "invent personal details.",
+        ]
+    lines += ["", f"Question: {question.text.strip()}"]
     if question.options:
         lines.append("Choose exactly one of these options and reply with it word for word: "
                      + json.dumps(question.options, ensure_ascii=False))
@@ -66,15 +78,19 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
     return "\n".join(lines)
 
 
-def build_context_prompt(*, job_description: str, resume_json: dict | None, company: str, role: str) -> str:
+def build_context_prompt(*, job_description: str, resume_json: dict | None, company: str, role: str,
+                         facts: str = "") -> str:
     """Sent first when a job has no saved conversation (or it is gone), so a new chat has the same grounding."""
     resume = json.dumps(resume_json, ensure_ascii=False) if resume_json else "(not available)"
-    return (
+    text = (
         f"I am applying for the {role or 'role'} position at {company or 'this company'}. I will ask you the "
         "questions from the application form, one by one.\n\n"
         f"JOB DESCRIPTION:\n{job_description.strip()}\n\n"
         f"MY RESUME JSON FOR THIS JOB:\n{resume}\n"
     )
+    if facts.strip():
+        text += f"\nMY PERSONAL FACTS (true, from my own settings):\n{facts.strip()}\n"
+    return text
 
 
 def extract_marked_answer(text: str) -> str:
@@ -93,6 +109,55 @@ def extract_marked_answer(text: str) -> str:
         return ""
     answer = text[body_from:end].strip()
     return "" if answer.lower() in _PLACEHOLDERS else answer
+
+
+_REPLY_AFTER = ("no mention of being an ai.", "reply with only the answer", "reply with a single number only.")
+
+
+def salvage_unmarked(raw: str, options: list[str], kind: str = "text") -> str:
+    """A reply that left out the markers can still be an answer: a short reply naming exactly one of the form's options
+    (or one number). ``raw`` is the end of the page, which holds our own question first, so only what follows it is read.
+    '' when the reply does not settle on one option."""
+    text = raw or ""
+    low = text.lower()
+    cut = max((low.rfind(m) + len(m) for m in _REPLY_AFTER if low.rfind(m) >= 0), default=-1)
+    if cut < 0:
+        return ""  # our question is not in view, so what is there could be an earlier answer
+    reply = text[cut:].strip()
+    fenced = extract_marked_answer(reply)
+    if fenced:  # the chat did answer in the markers; the page reader only missed it
+        return (match_option(fenced, options) or "") if options else fenced
+    reply = re.sub(re.escape(START) + r".*?" + re.escape(END), " ", reply, flags=re.S)
+    if not reply or len(reply) > 400:
+        return ""
+    if options:
+        found = [o for o in options if _canon(o) and re.search(r"(?<!\w)" + re.escape(_canon(o)) + r"(?!\w)", _canon(reply))]
+        found = [o for o in found if not any(o != other and _canon(o) in _canon(other) for other in found)]
+        exact = [o for o in options if _canon(o) == _canon(reply)]
+        return exact[0] if exact else found[0] if len(found) == 1 else ""
+    if kind == "number":
+        numbers = re.findall(r"\d+(?:\.\d+)?", reply)
+        return numbers[0] if len(set(numbers)) == 1 else ""
+    return ""
+
+
+def _flat(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def answer_after_prompt(page_text: str, prompt: str) -> str:
+    """The fenced answer that follows OUR question on the page, '' when there is none yet.
+
+    The page reader sometimes cannot pick the reply element out (a conversation whose last answer was the same word,
+    a page that re-draws), yet the reply is plainly on the page after our message. The anchor is our own "Question:"
+    line: every question ends with the same instructions, so only the question itself tells our message from an
+    earlier one. Until our question is on the page, nothing is taken."""
+    asked = re.search(r"Question: ([^\r\n]{8,60})", prompt or "")  # the first words of the question line
+    if not asked:
+        return ""
+    page = _flat(page_text)
+    where = page.rfind(_flat(asked.group(1)))
+    return extract_marked_answer(page[where:]) if where >= 0 else ""
 
 
 def count_marked_answers(text: str) -> int:

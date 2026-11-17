@@ -115,6 +115,11 @@ RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in
     # what you earn now is never stated (no fact exists for it), so it must not fall into the expectation rule below
     ("current_salary", r"current (salary|compensation|pay|rate)|salary history|(previous|last|prior) (salary|compensation|pay)"),
     ("salary_expectation", r"salary|compensation|pay (expectation|range)|desired (pay|rate)|expected (pay|rate)|hourly rate"),
+    # the date boxes of a work-history entry ("Start date year"), not "When is your earliest start date?"
+    ("history_start_year", r"^\s*start (date )?\W{0,3}year\W*$"),
+    ("history_end_year", r"^\s*end (date )?\W{0,3}year\W*$"),
+    ("history_start_month", r"^\s*start (date )?\W{0,3}month\W*$"),
+    ("history_end_month", r"^\s*end (date )?\W{0,3}month\W*$"),
     ("notice_period", r"notice period|when (can|could|would) you (start|begin|join)|earliest.*start|available to start|start date|availability to start"),
     ("relocation", r"relocat"),
     ("work_setup", r"workplace type|work this way"),
@@ -169,6 +174,10 @@ def classify(label: str) -> str:
             return "ambiguous"  # asks about authorization AND sponsorship in one question: not ours to merge
         if key == "needs_sponsorship" and re.search(r"authori[sz]ed to work|eligible to work|right to work", text):
             return "ambiguous"
+        if key == "has_relatives" and _CONSENT_NOTICE.search(text) and not re.search(r"relatives?|family member", text, re.I):
+            continue  # "...your data for purposes related to recruitment" is a consent notice, not a question about relatives
+        if key == "country" and re.search(r"authori[sz]|eligible|right to work", text, re.I):
+            continue  # "Your authorization to work in the country where you live" asks about authorization
         if key == "years_experience" and _SKILL_QUALIFIER.search(text):
             return ""  # "years of experience with Python" is about one skill, not the total: an open question
         return key
@@ -180,6 +189,9 @@ def classify(label: str) -> str:
 _IDENTITY = {"first_name", "last_name", "full_name", "email", "phone", "address", "zip", "state", "country", "city",
              "location", "current_company", "current_title", "school", "degree"}
 
+_ELIGIBILITY = re.compile(r"citizen|immigration|visa|sponsor|authori[sz]|work rights|right to work|eligib|permanent resident|green card",
+                          re.I)
+_CONSENT_NOTICE = re.compile(r"you consent|consent to|by submitting|personal data|privacy (policy|notice)", re.I)
 _YES_NO_QUESTION = re.compile(r"\s*(will|would|do|does|did|are|is|have|has|can|could|should)\b.*\?\s*$", re.I)
 # These ask for the place itself, so length does not turn them into an open question.
 _ASKS_FOR_PLACE = re.compile(
@@ -208,6 +220,7 @@ def _profile_value(key: str, ctx: Context) -> str:
         "work_authorization": p.work_authorization, "needs_sponsorship": p.needs_sponsorship,
     }
     latest = _latest_job(ctx.resume)
+    table.update(_latest_dates(ctx.resume))
     table.update({
         # read from the resume written for this job, never typed in twice
         "current_company": latest.get("company", ""), "current_title": latest.get("title", ""),
@@ -220,6 +233,24 @@ def _profile_value(key: str, ctx: Context) -> str:
         return "Yes" if (p.work_authorization == "Yes" and p.needs_sponsorship == "No") else "No"
     value = table.get(key, "") or f.get(key, "")
     return str(value).strip()
+
+
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+           "November", "December")
+
+
+def _latest_dates(resume: dict) -> dict[str, str]:
+    """Start and end month and year of the most recent position ("Jun 2023 - Sep 2026"); a part that is "Present" is blank."""
+    jobs = (resume or {}).get("experience")
+    first = jobs[0] if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict) else {}
+    parts = re.split(r"\s+(?:-|\u2013|\u2014|to)\s+", str(first.get("dates") or "").strip(), maxsplit=1)
+    out: dict[str, str] = {}
+    for name, part in zip(("start", "end"), parts + [""] * (2 - len(parts))):
+        year = re.search(r"\b(19\d\d|20\d\d)\b", part)
+        month = next((m for m in _MONTHS if re.search(r"\b" + m[:3] + r"[a-z]*\b", part, re.I)), "")
+        out[f"history_{name}_year"] = year.group(1) if year else ""
+        out[f"history_{name}_month"] = month
+    return out
 
 
 def _latest_job(resume: dict) -> dict[str, str]:
@@ -423,6 +454,10 @@ def choose_option(answer: str, options: list[Option], key: str = "") -> Option |
         if picked:
             return picked
     labels = [o.label for o in options]
+    if key == "state":
+        abbr = next((k for k, v in _STATE_NAMES.items() if v.casefold() == answer.strip().casefold()), "")
+        if abbr and abbr in labels:
+            return next(o for o in options if o.label == abbr)
     hit = match_option(answer, labels)
     if hit:
         return next(o for o in options if o.label == hit)
@@ -434,6 +469,15 @@ def choose_option(answer: str, options: list[Option], key: str = "") -> Option |
 # ---------------------------------------------------------------------------- the decision
 
 def decide(f: Field, ctx: Context) -> Decision:
+    d = _decide(f, ctx)
+    if (d.action == FILL and (f.kind == "number" or f.input_type == "number") and d.source != "salary"
+            and d.value.strip() and not re.fullmatch(r"[\d.,]+", d.value.strip())):
+        # A number box cannot take words ("Immediately"); better to stop than to put something else in it.
+        return _unanswerable(f, f"A number is needed here, not '{d.value[:30]}': {f.label.strip()}")
+    return d
+
+
+def _decide(f: Field, ctx: Context) -> Decision:
     label = f.label.strip()
 
     if f.kind == "file":
@@ -479,6 +523,8 @@ def decide(f: Field, ctx: Context) -> Decision:
         both = _authorized_and_status(f, ctx)
         if both:
             return both
+        if ctx.chat_enabled and f.options:
+            return Decision(CHAT, source="chat")  # two things in one question: the chat picks what is true for both
         return _unanswerable(f, f"Asks two things at once: {label}")
     if key == "time_zone":
         return _time_zone_decision(f, ctx)
@@ -490,6 +536,11 @@ def decide(f: Field, ctx: Context) -> Decision:
         answer = _stated(key, ctx)
         if key == "degree" and (f.is_choice or f.kind == "combobox"):
             answer = _degree_level(answer) or answer  # a list is filed under Bachelor, not the full degree name
+        if key.endswith("_month") and answer in _MONTHS and (f.kind == "number" or f.input_type == "number"):
+            answer = str(_MONTHS.index(answer) + 1)
+        if key.startswith("history_") and answer and f.is_choice:
+            option = choose_option(answer, f.options, key)
+            return Decision(FILL, option.label, "profile") if option else _unanswerable(f, f"No option matches '{answer}' for: {label}")
         if not answer:
             return _unanswerable(f, f"Not filled in under Auto Apply > Your answers: {label}")
         if key == "agree_consents" and answer == "No":
@@ -519,6 +570,11 @@ def decide(f: Field, ctx: Context) -> Decision:
                     decline = next((o for o in f.options if _DECLINE_OPTION.search(_plain(o.label))), None)
                     if decline is not None:
                         return Decision(FILL, decline.label, "facts")
+                only = _only_acknowledgement(f)
+                if only is not None:
+                    return Decision(FILL, only.label, "rule")
+                if ctx.chat_enabled and f.options and not key.startswith("eeo_"):
+                    return Decision(CHAT, source="chat")  # the chat chooses the option that fits, knowing your facts
                 return _unanswerable(f, f"No option matches '{answer}' for: {label}")
             return Decision(FILL, option.label, "facts")
         return Decision(FILL, answer, "profile" if key in _PROFILE_KEYS else "facts")
@@ -529,6 +585,8 @@ def decide(f: Field, ctx: Context) -> Decision:
         saved = _saved_form_answer(f, ctx)
         if saved:
             return saved
+        if ctx.chat_enabled and f.options and _ELIGIBILITY.search(label):
+            return Decision(CHAT, source="chat")  # work eligibility is answered from your facts, which the chat is given
         return _unanswerable(f, f"Not covered by your facts: {label}")
     choice_like = f.is_choice or f.kind == "checkgroup"
     if choice_like and f.options and ctx.chat_enabled:
@@ -667,6 +725,14 @@ def _none_of_the_above(f: Field, ctx: Context) -> Decision | None:
         if rel:
             return Decision(FILL, rel.label, "facts")
     return Decision(FILL, none.label, "facts")
+
+
+def _only_acknowledgement(f: Field) -> Option | None:
+    """A consent notice whose list holds a single acceptance ("Accept", "I agree") leaves nothing to choose: that option."""
+    consent = _CONSENT_NOTICE.search(f.label or "") or re.search(r"acknowledge|i agree|agree to|consent", f.label or "", re.I)
+    if len(f.options) != 1 or not consent:
+        return None
+    return _consent_option("Yes", f.options)
 
 
 def _consent_option(answer: str, options: list[Option]) -> Option | None:

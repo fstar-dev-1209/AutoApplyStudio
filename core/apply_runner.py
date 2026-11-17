@@ -23,6 +23,7 @@ from core.discovery_runner import within_hours
 from core.form_answers import Context
 from core.form_filler import Files
 from core.job_order import application_order, posting_times
+from core.personal_facts import facts_for
 from core.salary_answer import pay_context_for
 from core.greenhouse import (
     DRY_RUN, FAILED, HUMAN_CHECK, NEEDS_YOU, SUBMITTED, ApplyOutcome, GreenhouseApplier,
@@ -239,7 +240,11 @@ class ApplyRunner:
             job = self.store.get(job_id)
             if job is None or job.applied_at or job.archived_at:
                 continue
-            for row in reversed(self.attempts.for_job(job.id)):
+            history = self.attempts.for_job(job.id)
+            if any(a["state"] == "expired" or (a["state"] == "dismissed" and "closed" in (a["reason"] or "").lower())
+                   for a in history):
+                continue  # the posting is gone: trying again only opens an error page
+            for row in reversed(history):
                 if row["state"] in {"needs_you", "human_check"} and not row["resolved_at"]:
                     self.attempts.resolve(int(row["id"]), self._now())
                     break
@@ -374,8 +379,8 @@ class ApplyRunner:
             pay=pay_context_for(job, s))
         answer = None
         if chat is not None:
-            answer = make_answer_fn(job, chat, style_prompt=s.answer_prompt,
-                                    on_conversation=lambda url, jid=job.id: self._remember_chat(jid, url))
+            answer = make_answer_fn(job, chat, style_prompt=s.answer_prompt, facts_text=facts_for(form_ctx),
+                                    log=self._debug_log, on_conversation=lambda url, jid=job.id: self._remember_chat(jid, url))
         applier = self._factory(answer=answer, shots_dir=self._shots, notify=self._alert,
                                 should_stop=self._kill.is_set, mail=self._mail, debug_log=self._debug_log)
 

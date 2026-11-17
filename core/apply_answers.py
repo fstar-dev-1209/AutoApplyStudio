@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol
 
 from core.chat_questions import (
@@ -11,6 +12,7 @@ from core.chat_questions import (
     build_context_prompt,
     build_question_prompt,
     extract_marked_answer,
+    salvage_unmarked,
 )
 from core.models import JobItem
 
@@ -36,6 +38,8 @@ def make_answer_fn(
     style_prompt: str = "",
     on_conversation: Callable[[str], None] = lambda url: None,
     timeout_sec: int = 300,
+    facts_text: str = "",
+    log: Callable[[str], None] = lambda message: None,
 ) -> Callable[[Question], str]:
     """A function that answers one form question in the chat that wrote this job's resume.
 
@@ -43,10 +47,12 @@ def make_answer_fn(
     description and the resume JSON first. A reply that arrives without the answer markers is asked for once more.
     """
     context = build_context_prompt(job_description=job.job_description, resume_json=job.resume_json,
-                                   company=job.company, role=job.role_title)
+                                   company=job.company, role=job.role_title, facts=facts_text)
     state = {"url": job.chat_url}
 
     def answer(question: Question) -> str:
+        if facts_text and not question.facts and question.kind != "salary":
+            question = replace(question, facts=facts_text)  # said with every question: an old conversation has not seen them
         prompt = build_question_prompt(question, style_prompt.strip() or DEFAULT_ANSWER_PROMPT)
         last_error = "no answer"
         for attempt in range(2):
@@ -62,6 +68,11 @@ def make_answer_fn(
             last_error = result.error or "empty answer"
             if "markers" not in last_error:
                 break  # a sign-in or timeout problem: asking again will not help
+            log(f"[chat] no markers for {question.text[:70]!r}; the page ended with: {(result.raw or '')[-500:]!r}")
+            saved = salvage_unmarked(result.raw, question.options, question.kind)
+            if saved:
+                log(f"[chat] taken from the unmarked reply: {saved!r}")
+                return saved
         raise ChatUnavailable(last_error)
 
     return answer

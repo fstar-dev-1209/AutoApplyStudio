@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from core.chat_questions import END, START, count_marked_answers, extract_marked_answer
+from core.chat_questions import END, START, answer_after_prompt, count_marked_answers, extract_marked_answer
 from core.chat_sites import PAGE_BLOCKS, block_message
 from ui.chat_service import ChatService
 
@@ -16,7 +16,7 @@ STABLE_POLLS = 2  # the reply must be unchanged for this many polls (about 2 s) 
 # Then, with no markers at all, give up on it. Not sooner than half a minute: ChatGPT shows a short "thinking" line
 # before the answer, and the page does not always say that it is still writing.
 UNMARKED_POLLS = 30
-QUIET_POLLS = 45  # about 45 s of an unchanging conversation with no new answer and nothing being written
+QUIET_POLLS = 75  # about 75 s of an unchanging conversation with no new answer and nothing being written
 
 
 @dataclass
@@ -66,6 +66,8 @@ class ChatAsker(QObject):
         self._quiet = 0
         self._last_text = ""
         self._same = 0
+        self._prompt = question_prompt
+        self._tail_last, self._tail_same = "", 0
         try:
             err = self._open_conversation(chat_url, context_prompt)
             if err:
@@ -170,6 +172,16 @@ class ChatAsker(QObject):
             changed = changed and count_marked_answers(text) > self._base_answers
         fresh = int(data.get("turns") or 0) > self._base_turns or changed
         page = str(data.get("pageText") or "")
+        after = answer_after_prompt(page, self._prompt) if page and page != self._base_page_text else ""
+        if after and not data.get("generating"):
+            # The reply to OUR question is on the page, whatever the reader made of it (see answer_after_prompt).
+            self._tail_same = self._tail_same + 1 if after == self._tail_last else 1
+            self._tail_last = after
+            if self._tail_same >= STABLE_POLLS:
+                self._succeed(after, f"{START}{after}{END}")
+                return
+        else:
+            self._tail_last, self._tail_same = "", 0
         if (not fresh or not extract_marked_answer(text)) and count_marked_answers(page) > self._base_page_answers:
             # The reply element could not be picked out, but the conversation on screen holds one more fenced
             # answer than before the question was sent: that answer is ours.
