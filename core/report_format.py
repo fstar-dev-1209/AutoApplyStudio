@@ -156,6 +156,9 @@ def application_result(job: JobItem, state: str, reason: str, plan: list[dict]) 
     if state == "failed":
         return Message(_lines("❌ <b>APPLICATION FAILED</b>", _job(job), _link(job),
                               f"<i>{esc(cut(reason, 300))}</i>" if reason else "", "↻ It will be tried again later."))
+    if state == "dismissed":
+        return Message(_lines("⏭ <b>APPLICATION SKIPPED</b>", _job(job), _link(job),
+                              f"<i>{esc(cut(reason, 300))}</i>" if reason else ""))
     if state == "expired":
         return Message(_lines("🚫 <b>POSTING CLOSED</b>", _job(job), _link(job)))
     if state == "dry_run":

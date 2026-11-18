@@ -438,3 +438,32 @@ def test_trying_a_closed_posting_by_hand_does_not_reopen_it(env):
     calls = len(env.calls)
     env.runner.request_now(job.id, submit=True)
     assert env.tick() is None and len(env.calls) == calls
+
+
+def test_only_what_truly_needs_you_waits_for_you(env):
+    from core.form_answers import BOT_CHECK_REASON
+
+    temporary = env.job(1)
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, "The chat could not answer 'City?': The app did not respond.; "
+                                            "Email: TimeoutError: Locator.input_value: Timeout 3000ms exceeded.")]
+    assert env.tick().state == FAILED and env.alerts == []  # retried by itself later
+    assert env.attempts(temporary)[0]["state"] == "failed"
+
+    bot = env.job(2, company="BotCheck")
+    env.now += timedelta(minutes=1)
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, BOT_CHECK_REASON)]
+    env.runner.request_now(bot.id, submit=True)
+    assert env.tick().state == "dismissed" and env.alerts == []
+    assert "automated" in env.attempts(bot)[0]["reason"]
+
+
+def test_the_same_stop_twice_is_set_aside(env):
+    job = env.job(1)
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, "No answer for: Portfolio password")]
+    assert env.tick().state == NEEDS_YOU
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, "No answer for: Portfolio password")]
+    env.runner.request_now(job.id, submit=True)
+    assert env.tick().state == "dismissed"
+    assert env.runner.attempts.needs_you() == []
+    env.now += timedelta(days=1)
+    assert env.tick() is None  # never picked again

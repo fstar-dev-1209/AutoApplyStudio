@@ -1536,6 +1536,14 @@ class MainWindow(QMainWindow):
                 self.files_view.refresh()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # A close from the window itself (its X button, Alt+F4) asks first: closing stops resume generation, job search
+        # and applying until the app is started again. A close made by the app or a test (close()) does not ask.
+        if event.spontaneous() and not getattr(self, "_closing", False) and not ask_yes_no(
+                self, "Close Auto Apply Studio?",
+                "Resume generation, job search and applying stop while the app is closed, and it does not start "
+                "again on its own.\n\nClose it now?"):
+            event.ignore()
+            return
         self._closing = True  # stop UI refreshes first; background threads may still emit while they wind down
         if self.is_viewer:
             self.viewer.stop()

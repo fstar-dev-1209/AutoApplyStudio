@@ -104,6 +104,25 @@ Your contact details, demographic and legal answers and pay are shown as 🔒 *k
 this computer (`Application answers.txt` in the job's folder). A Telegram chat with a bot is not end-to-end encrypted,
 which is why. Links never unfold into a preview card.
 
+**If the app stops or freezes.** A small watchdog starts with the app and sends ⚠️ *Auto Apply Studio stopped*
+(on its own), *was closed* (from its window), *is not responding* (the window has not answered for 3 minutes) or *is
+responding again*, with the free memory on the server. It never starts the app again: start it yourself with
+`Run Auto Apply Studio.bat`.
+
+**Memory.** A chat page that stays open keeps growing. An idle page above 1.5 GB is replaced by a fresh one (checked
+every minute, never while it is writing a resume or answering a question).
+
+**Only what truly needs you waits for you.** A stop caused only by temporary problems (the chat page or the browser
+was busy or closed, a click timed out, the security-code email was late) is recorded as a failure and retried by
+itself after 30 minutes. A form the bot must not or cannot complete (it asks whether the application is automated,
+asks for answers written without AI, or wants a document the app cannot make) is skipped for good, with a ⏭
+*APPLICATION SKIPPED* message. A job that stops on the same thing twice is set aside.
+
+**Answers the chat writes are checked before they are typed in.** An answer that talks about the information instead
+of answering ("Address not provided", "I can't determine…", "my resume", "as an AI") is asked for once more; if it
+is still not a real answer, an optional question is left blank and a required one stops for you. Your address,
+preferred name, GPA and certifications come from *Your answers*, never from the chat.
+
 ## Modes (Auto Apply page)
 
 - **Off**: nothing is applied (finding jobs can still run).

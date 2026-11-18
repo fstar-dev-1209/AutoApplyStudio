@@ -54,6 +54,9 @@ class ChatService(QObject):
         super().__init__(parent)
         self._page = page
         self._view = view  # the browser widget showing this page, when it is not the parent's ``browser``
+        # Paste as plain text (Ctrl+Shift+V): ChatGPT then takes the message as typing, never as a "Pasted text" file.
+        # Set on the application-questions page (see ClaudeChatView).
+        self.plain_paste = False
         self.site: ChatSite = site or SITES[CLAUDE]
         self._busy = False
         self._progress: ProgressFn | None = None
@@ -69,6 +72,10 @@ class ChatService(QObject):
     @property
     def label(self) -> str:
         return self.site.label
+
+    def replace_page(self, page: QWebEnginePage) -> None:
+        """Drive a fresh page from now on (the old one is being recycled to free its memory; see ClaudeChatView)."""
+        self._page = page
 
     @property
     def busy(self) -> bool:
@@ -691,7 +698,8 @@ class ChatService(QObject):
                     # and needs no keyboard focus on the desktop, so it also works when the app is behind other
                     # windows or nobody is signed in to the screen (an unattended VPS).
                     if attempt == 0 and self._composer_has_focus():
-                        self._page.triggerAction(QWebEnginePage.WebAction.Paste)
+                        self._page.triggerAction(QWebEnginePage.WebAction.PasteAndMatchStyle if self.plain_paste
+                                                 else QWebEnginePage.WebAction.Paste)
                     else:
                         self._press_paste(view)
                 # Leave the prompt on the clipboard until ChatGPT has taken the paste.
@@ -793,16 +801,17 @@ class ChatService(QObject):
         try:
             QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
             self._pump_events(40)
-            QTest.keyClick(target, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+            QTest.keyClick(target, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier
+                           | (Qt.KeyboardModifier.ShiftModifier if self.plain_paste else Qt.KeyboardModifier.NoModifier))
         except RuntimeError:
             pass
         import sys
         if sys.platform == "win32":
             self._win_chord(target, 0x41)  # A, inside the focused message box
             self._pump_events(40)
-            self._win_chord(target, 0x56)  # V
+            self._win_chord(target, 0x56, shift=self.plain_paste)  # V (Shift+V: as plain text)
 
-    def _win_chord(self, widget, vk: int) -> None:
+    def _win_chord(self, widget, vk: int, *, shift: bool = False) -> None:
         import ctypes
 
         user32 = ctypes.windll.user32
@@ -813,8 +822,12 @@ class ChatService(QObject):
         if not self._force_foreground(hwnd):
             return  # the keys would land in another window
         user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
+        if shift:
+            user32.keybd_event(0x10, 0, 0, 0)  # Shift down
         user32.keybd_event(vk, 0, 0, 0)
         user32.keybd_event(vk, 0, 2, 0)
+        if shift:
+            user32.keybd_event(0x10, 0, 2, 0)
         user32.keybd_event(0x11, 0, 2, 0)
 
     @staticmethod

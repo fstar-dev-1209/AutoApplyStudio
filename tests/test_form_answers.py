@@ -719,3 +719,71 @@ def test_your_facts_are_written_for_the_chat():
 def test_an_earliest_start_date_question_is_not_a_work_history_date():
     assert classify("When is your earliest start date? (month/year)") == "notice_period"
     assert classify("Start Date - Year*") == "history_start_year"
+
+
+def test_addresses_names_gpa_and_certifications_come_from_your_details_not_the_chat():
+    facts = {"address": "1 Main St", "city": "Austin", "state": "TX", "zip": "78701"}
+    for label in ("Please provide your full home address.", "Current Address", "Permanent Legal Address"):
+        d = decide(text(label, required=True), ctx(facts=facts, chat_enabled=True))
+        assert (d.action, d.value) == (FILL, "1 Main St, Austin, TX 78701"), label
+    assert decide(text("Street Address", required=True), ctx(facts=facts)).value == "1 Main St"
+    assert decide(text("Preferred Last Name", required=True), ctx()).value == "van der Berg"
+    gpa = text("What is your cumulative GPA?", required=True)
+    assert decide(gpa, ctx(chat_enabled=True)).action == NEEDS  # not saved: never written by the chat
+    assert decide(gpa, ctx(facts={"gpa": "3.6"})).value == "3.6"
+    certs = text("Please share any relevant certifications you have received.", required=True)
+    assert decide(certs, ctx(facts={"certifications": "None"}, chat_enabled=True)).value == "None"
+
+
+def test_the_facts_for_the_chat_are_short_and_say_what_answers_questions():
+    from core.personal_facts import personal_facts_text
+
+    facts = {"address": "1 Main St", "city": "Austin", "state": "TX", "zip": "78701", "country": "United States",
+             "certifications": "None", "other_names": "None", "relocation": "Yes", "notice_period": "Immediately",
+             "about_me": "I can travel.", "sms_consent": "Yes", "pronouns": "She/Her", "eeo_race": "Asian"}
+    many = {f"question {n}": "Yes" for n in range(40)}
+    text = personal_facts_text(PROFILE, facts, many)
+    assert "1 Main St, Austin, TX 78701, United States" in text and "my only address" in text
+    assert "Certifications: None" in text and "Other names or aliases: None" in text and "I can travel." in text
+    assert "She/Her" not in text and "Asian" not in text and "text messages" not in text
+    assert "question 39" in text and "question 27" not in text  # only the latest saved answers
+    assert len(text) < 2500
+
+
+def test_aliases_and_other_names_come_from_your_answers():
+    assert decide(text("List any aliases or other name(s) you have used", required=True),
+                  ctx(facts={"other_names": "None"})).value == "None"
+
+
+def test_a_question_that_asks_for_an_answer_without_ai_is_never_given_to_the_chat():
+    from core.form_answers import NO_AI_REASON
+
+    why = text("Why are you interested in this role? (While we love AI please do not use AI/ ChatGPT for any part)",
+               required=True, kind="textarea")
+    d = decide(why, ctx(chat_enabled=True))
+    assert d.action == NEEDS and d.reason.startswith(NO_AI_REASON)
+    personal = text("In your own words, what draws you to us? Please answer personally (without using AI).",
+                    required=True, kind="textarea")
+    assert decide(personal, ctx(chat_enabled=True)).reason.startswith(NO_AI_REASON)
+    assert decide(text("How do you use AI tools day to day?", required=True, kind="textarea"),
+                  ctx(chat_enabled=True)).action == CHAT
+
+
+def test_small_gaps_seen_in_real_forms():
+    facts = {"address": "1 Main St", "city": "Austin", "state": "TX", "zip": "78701"}
+    assert decide(text("Physical Address", required=True), ctx(facts=facts)).value == "1 Main St, Austin, TX 78701"
+    heard = choice("How did you first hear about us?", ["LinkedIn: (job post)", "Other Job Boards: (Indeed, portals)", "Other"],
+                   kind="combobox")
+    assert decide(heard, ctx(facts={"referral_source": "Indeed"})).value == "Other Job Boards: (Indeed, portals)"
+    zones = choice("What is your time zone?", ["UTC-6: Central Time (US), Mexico", "UTC-5: Eastern Time (US), Colombia",
+                                               "UTC+2: Eastern Europe, Egypt"], kind="combobox")
+    assert decide(zones, ctx(facts={"state": "FL"})).value == "UTC-5: Eastern Time (US), Colombia"
+    odd = choice("What is your time zone?", ["GMT-5", "GMT+1"], kind="combobox")
+    assert decide(odd, ctx(facts={"state": "FL"}, chat_enabled=True)).action == CHAT
+    notice = choice("It is unlawful in Massachusetts to require or administer a lie detector test as a condition of "
+                    "employment. An employer who violates this law shall be subject to criminal penalties.",
+                    ["I acknowledge I received this notice", "I do not reside in Massachusetts"], kind="combobox")
+    assert decide(notice, ctx()).value == "I acknowledge I received this notice"
+    context = text("If applicable, please provide additional context to the previous question.", required=True,
+                   kind="textarea")
+    assert (decide(context, ctx(chat_enabled=True)).action, decide(context, ctx()).value) == (FILL, "N/A")

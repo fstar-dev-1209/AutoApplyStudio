@@ -278,3 +278,15 @@ def test_a_reply_the_reader_missed_is_still_taken_from_the_end_of_the_page():
     raw = (_PROMPT[-300:] + "\n…\nShow more\nChatGPT said:\n\n[[ANSWER_START]]Yes[[ANSWER_END]]\n\nChatGPT can make mistakes.")
     assert salvage_unmarked(raw, ["Yes", "No"]) == "Yes"
     assert salvage_unmarked(raw, ["Maybe", "No"]) == ""  # an answer that is not an option is not taken
+
+
+def test_answers_that_talk_about_the_information_are_caught():
+    from core.chat_questions import ANSWER_RULES, NO_ANSWER, answer_problem
+
+    for bad in ("Full home address not provided.", "I can't determine an accurate number from the verified history.",
+                "I'm not sure", "I have not listed any certifications on my resume.", "As an AI, I cannot say.", NO_ANSWER):
+        assert answer_problem(bad), bad
+    for good in ("Yes", "I built an MCP server at Braze to speed up log triage.", "10", "N/A"):
+        assert answer_problem(good) == "", good
+    assert answer_problem("I'm Not Sure", is_choice=True) == ""  # the form's own option
+    assert ANSWER_RULES in build_question_prompt(Question("Why us?"))

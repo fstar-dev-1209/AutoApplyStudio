@@ -140,7 +140,47 @@ def main() -> int:
     window = MainWindow()
     window.show()
     _watch_for_freezes(app)
-    return app.exec()
+    mark_closed = _heartbeat_and_watchdog(app)
+    code = app.exec()
+    mark_closed()  # closed from the window: the watchdog reports a close, not a crash
+    return code
+
+
+def _heartbeat_and_watchdog(app):
+    """Write a heartbeat from the window's own thread, and start the watchdog (core.watchdog) that reports on Telegram
+    when the app stops or freezes. The watchdog never starts the app again. Returns the function that marks a close."""
+    import subprocess
+    import time
+
+    from PySide6.QtCore import QTimer
+
+    from core.paths import config_dir
+    from core.watchdog import BEAT_SECONDS, HEARTBEAT_FILE, write_heartbeat
+
+    path = config_dir() / HEARTBEAT_FILE
+    pid, started = os.getpid(), time.time()
+
+    def beat(closed: bool = False) -> None:
+        try:
+            write_heartbeat(path, pid, started, closed=closed)
+        except OSError:
+            pass
+
+    beat()
+    timer = QTimer(app)
+    timer.setInterval(BEAT_SECONDS * 1000)
+    timer.timeout.connect(beat)
+    timer.start()
+    try:
+        exe = Path(sys.executable)
+        quiet = exe.with_name("pythonw.exe")  # no console window
+        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen([str(quiet if quiet.exists() else exe), "-m", "core.watchdog", "--pid", str(pid)],
+                         cwd=str(Path(__file__).resolve().parent), creationflags=flags, close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001 - the app runs without the watchdog rather than not at all
+        pass
+    return lambda: beat(closed=True)
 
 
 def _watch_for_freezes(app) -> None:

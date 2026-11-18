@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
 from core.chat_browser_profile import chat_web_profile, clear_chat_browser_data
 from core.chat_sites import CLAUDE, SITES
+from core.proc_info import private_mb
 from ui import copy as C
 from ui.chat_service import ChatService
 from ui.dialogs import ask_yes_no, show_info
@@ -33,6 +34,12 @@ class _KeepAliveView(QWebEngineView):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._keep_alive()
+
+
+# A chat page grows for as long as it stays open (ChatGPT's page reached 3-3.6 GB on a 6 GB server and the app was
+# closed for lack of memory). An idle page above this size is replaced by a fresh one, which frees all of it.
+RECYCLE_ABOVE_MB = 1500
+MEMORY_CHECK_MS = 60_000
 
 
 class ClaudeChatView(QWidget):
@@ -108,10 +115,15 @@ class ClaudeChatView(QWidget):
         self.service = ChatService(page, self, site=self.site, view=self.browser)
         self.service.activity.connect(self._on_activity)
         self.ask_service = ChatService(ask_page, self, site=self.site, view=self.ask_browser)
+        self.ask_service.plain_paste = True  # questions are pasted as plain text, so they never become a file
 
         self.new_chat_btn.clicked.connect(self._open_new_chat)
         self.reload_btn.clicked.connect(self.browser.reload)
         self.clear_session_btn.clicked.connect(self._clear_session)
+        self._memory_timer = QTimer(self)
+        self._memory_timer.setInterval(MEMORY_CHECK_MS)
+        self._memory_timer.timeout.connect(self.recycle_large_pages)
+        self._memory_timer.start()
         self.open_home_btn.clicked.connect(self._open_home)
         self.browser.loadFinished.connect(self._on_load_finished)
 
@@ -136,6 +148,35 @@ class ClaudeChatView(QWidget):
         page = QWebEnginePage(chat_web_profile(self.site.key), parent)
         page.proxyAuthenticationRequired.connect(self._on_proxy_auth)
         return page
+
+    def page_memory_mb(self) -> dict[str, int]:
+        """Memory held by each chat page's browser process, in MB (0 when it cannot be read)."""
+        return {"resumes": private_mb(self.browser.page().renderProcessPid()),
+                "questions": private_mb(self.ask_browser.page().renderProcessPid())}
+
+    def recycle_large_pages(self) -> list[str]:
+        """Replace each idle page that has grown past RECYCLE_ABOVE_MB with a fresh one. Never while it is writing a
+        resume or answering a question, nor while either page is pasting. Returns the panes that were replaced."""
+        if ChatService.paste_in_progress():
+            return []
+        done = []
+        sizes = self.page_memory_mb()
+        for name, view, attr in (("resumes", self.browser, "service"), ("questions", self.ask_browser, "ask_service")):
+            service: ChatService = getattr(self, attr)
+            if sizes[name] < RECYCLE_ABOVE_MB or service.busy:
+                continue
+            old = view.page()
+            page = self._new_page(view)
+            view.setPage(page)
+            service.replace_page(page)
+            page.load(QUrl(self.site.home))
+            keep_alive = getattr(view, "_keep_alive", None)
+            if keep_alive:
+                keep_alive()  # a hidden page must not be throttled (see _KeepAliveView)
+            old.deleteLater()  # its browser process ends with it, and its memory with it
+            done.append(name)
+            self._on_activity(f"The {name} page was reloaded to free memory ({sizes[name]:,} MB).")
+        return done
 
     def _on_proxy_auth(self, _url, authenticator, _proxy_host) -> None:
         user, password = self._proxy_credentials() if self._proxy_credentials else ("", "")
@@ -174,6 +215,7 @@ class ClaudeChatView(QWidget):
         ask_page = self._new_page(self.ask_browser)
         self.ask_browser.setPage(ask_page)
         self.ask_service = ChatService(ask_page, self, site=self.site, view=self.ask_browser)
+        self.ask_service.plain_paste = True  # questions are pasted as plain text, so they never become a file
         self.browser.load(QUrl(self.site.home))
         self.ask_browser.load(QUrl(self.site.home))
         self.status_label.setText(C.CLAUDE_STATUS_SIGNED_OUT)

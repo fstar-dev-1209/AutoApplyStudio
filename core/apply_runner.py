@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,7 +21,7 @@ from core.apply_facts import DEFAULTS, answered_form_questions, merge_form_quest
 from core.applications import ApplicationService
 from core.company_match import applied_matches, normalize_company
 from core.discovery_runner import within_hours
-from core.form_answers import Context
+from core.form_answers import BOT_CHECK_REASON, NO_AI_REASON, UNKNOWN_FILE_REASON, Context
 from core.form_filler import Files
 from core.job_order import application_order, posting_times
 from core.personal_facts import facts_for
@@ -34,6 +35,20 @@ from core.settings_store import GENERATION_CLAUDE_CHAT, AppSettings
 
 OFF, IDLE, RUNNING, WAITING, STOPPED = "off", "idle", "running", "waiting", "stopped"
 RETRY_FAILED_AFTER = timedelta(minutes=30)
+DISMISSED = "dismissed"  # set aside for good: never picked again
+
+# A stop that a later try usually gets past (the chat page or the browser was busy or closed, a click timed out, the
+# security-code email was late). Such a stop is recorded as a failure, which is retried by itself after a while.
+_TRANSIENT = re.compile(
+    r"The app did not respond|page did not respond|TargetClosedError|TimeoutError|security code email did not arrive|"
+    r"cleared the composer but no reply started|left Send disabled|took too long to answer|ERR_INSUFFICIENT_RESOURCES",
+    re.I)
+# A form the bot must not complete, or cannot: the job is skipped for good, without waiting for you.
+_AUTO_SKIP = (
+    (BOT_CHECK_REASON, "the form asks whether the application is automated"),
+    (NO_AI_REASON, "the employer asks for answers written without AI"),
+    (UNKNOWN_FILE_REASON, "the form asks for a document the app cannot make"),
+)
 MAX_ATTEMPTS_PER_JOB = 3
 
 
@@ -357,6 +372,7 @@ class ApplyRunner:
             outcome = self._run_in_browser(job, s, submit)
         except Exception as exc:  # noqa: BLE001 - a browser failure is recorded against this job
             outcome = ApplyOutcome(FAILED, f"{type(exc).__name__}: {str(exc).splitlines()[0][:200] if str(exc) else ''}")
+        outcome = self._settle(job, outcome, attempt)
         self.attempts.finish(attempt, outcome, self._now())
         self._record(job, outcome, submit, label)
         self.status.current = ""
@@ -365,6 +381,25 @@ class ApplyRunner:
             self.status.state, self.status.message = STOPPED, "Stopped by you. Press Resume to continue."
         else:
             self.status.state, self.status.message = IDLE, self.status.last_outcome
+        return outcome
+
+    def _settle(self, job: JobItem, outcome: ApplyOutcome, attempt_id: int) -> ApplyOutcome:
+        """What a stop really is, so that only what truly needs you waits for you:
+        - a form the bot must not or cannot complete: the job is skipped for good;
+        - only temporary problems: a failure, retried by itself later;
+        - the same stop as the last time: set aside, since trying again cannot get past it."""
+        if outcome.state != NEEDS_YOU:
+            return outcome
+        reason = outcome.reason or ""
+        for marker, why in _AUTO_SKIP:
+            if marker in reason:
+                return replace(outcome, state=DISMISSED, reason=f"Skipped automatically: {why}. ({reason[:300]})")
+        parts = [p for p in (outcome.needs or re.split(r";\s+", reason)) if p.strip()]
+        if parts and all(_TRANSIENT.search(p) for p in parts):
+            return replace(outcome, state=FAILED)
+        earlier = [a for a in self.attempts.for_job(job.id) if int(a["id"]) != attempt_id and a["state"] == NEEDS_YOU]
+        if earlier and (earlier[-1]["reason"] or "") == reason:
+            return replace(outcome, state=DISMISSED, reason=f"Set aside: it stopped on the same thing twice. ({reason[:300]})")
         return outcome
 
     def _run_in_browser(self, job: JobItem, s: AppSettings, submit: bool) -> ApplyOutcome:

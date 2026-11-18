@@ -101,6 +101,13 @@ FACTS: tuple[FactSpec, ...] = (
     FactSpec("background_check", "Willing to take a background check", choices=YES_NO, group="Work authorization"),
     FactSpec("drug_test", "Willing to take a drug test", choices=YES_NO, group="Work authorization"),
     FactSpec("security_clearance", "Security clearance", "e.g. None, Secret, Top Secret", group="Work authorization"),
+    FactSpec("gpa", "GPA", "e.g. 3.6. Blank: an optional GPA question is left blank, a required one stops for you",
+             group="Background"),
+    FactSpec("certifications", "Certifications", "e.g. AWS Solutions Architect - Associate (2023), or None",
+             group="Background"),
+    FactSpec("other_names", "Other names or aliases", "None if you have never used another name", group="Background"),
+    FactSpec("about_me", "Anything else the chat should know",
+             "Plain facts it can use when answering, e.g. open to travel, any shift, any start date", group="Background"),
 
     FactSpec("salary_expectation", "Expected salary", "e.g. $150,000 per year", group="Pay and availability"),
     FactSpec("notice_period", "Notice period / earliest start", "e.g. 2 weeks, Immediately", group="Pay and availability"),

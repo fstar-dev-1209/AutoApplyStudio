@@ -374,3 +374,24 @@ def test_an_optional_question_is_still_answered_when_leaving_blanks_is_switched_
     out = run(host, board, files, tmp_path, form_ctx=ctx(chat_enabled=True, skip_optional=False))
     assert out.state == SUBMITTED, (out.reason, out.needs)
     assert board.submissions[0]["question_1"] == "https://linkedin.com/in/mary"
+
+
+def test_a_chat_answer_about_missing_information_is_asked_again_and_never_typed_in():
+    from core.form_answers import Context, Field
+    from core.greenhouse import GreenhouseApplier
+    from core.settings_store import ProfileSettings
+
+    replies = iter(["Certifications not provided.", "NO_ANSWER"])
+    applier = GreenhouseApplier(answer=lambda q: next(replies), board_api="")
+    field = Field(ref="c", kind="textarea", label="Tell us about your on-call experience", required=True)
+    d = applier._ask(field, Context(profile=ProfileSettings(), chat_enabled=True))
+    assert d.action == "needs" and "No usable answer" in d.reason
+
+    replies = iter(["Not provided.", "I led the on-call rotation for payments."])
+    applier = GreenhouseApplier(answer=lambda q: next(replies), board_api="")
+    d = applier._ask(field, Context(profile=ProfileSettings(), chat_enabled=True))
+    assert (d.action, d.value) == ("fill", "I led the on-call rotation for payments.")
+
+    optional = Field(ref="o", kind="text", label="Anything else?", required=False)
+    applier = GreenhouseApplier(answer=lambda q: "I'm not sure", board_api="")
+    assert applier._ask(optional, Context(profile=ProfileSettings(), chat_enabled=True)).action == "skip"

@@ -115,3 +115,30 @@ def test_resumes_no_longer_wait_for_questions_to_be_answered():
 
     assert not hasattr(QueueEngine, "_yield_to_questions")
     assert not hasattr(MainWindow, "_questions_want_the_chat")
+
+
+def test_an_idle_page_that_grew_too_large_is_replaced_and_a_busy_one_is_not(qapp, qtbot, monkeypatch):
+    import ui.claude_chat_view as chat_view
+    from ui.claude_chat_view import ClaudeChatView
+
+    view = ClaudeChatView(site_key=CHATGPT)
+    qtbot.addWidget(view)
+    monkeypatch.setattr(chat_view, "private_mb", lambda pid: 3000)
+    resumes, questions = view.chat_service(), view.question_service()
+    old_resume_page, old_question_page = resumes._page, questions._page
+    questions._busy = True  # answering a question right now
+    assert view.recycle_large_pages() == ["resumes"]
+    assert resumes._page is view.browser.page() and resumes._page is not old_resume_page
+    assert questions._page is old_question_page
+    questions._busy = False
+    monkeypatch.setattr(chat_view, "private_mb", lambda pid: 400)
+    assert view.recycle_large_pages() == []  # small pages are left alone
+
+
+def test_the_questions_page_pastes_as_plain_text(qapp, qtbot):
+    from ui.claude_chat_view import ClaudeChatView
+
+    view = ClaudeChatView(site_key=CHATGPT)
+    qtbot.addWidget(view)
+    assert view.question_service().plain_paste is True
+    assert view.chat_service().plain_paste is False

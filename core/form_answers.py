@@ -20,6 +20,9 @@ from core.settings_store import ProfileSettings
 FILL, CHAT, SKIP, NEEDS = "fill", "chat", "skip", "needs"
 RESUME_FILE, COVER_FILE = "@resume", "@cover"  # values meaning "attach the generated file"
 OPTIONAL_REASON = "Optional: left blank"
+BOT_CHECK_REASON = "This asks whether the submission is automated, so it is left blank"
+NO_AI_REASON = "The employer asks for this answer to be written without AI"
+UNKNOWN_FILE_REASON = "Unknown attachment"
 
 
 @dataclass
@@ -82,14 +85,21 @@ SENSITIVE = re.compile(
 RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in [
     ("first_name", r"^(legal |preferred )?first name|^given name|^first$|"
                    r"^(what(?:'s| is) your |your |please (?:provide|enter) your )?preferred (first )?name\??:?\s*$"),
-    ("last_name", r"^(legal )?last name|^family name|^surname|^last$"),
+    ("last_name", r"^(legal |preferred )?last name|^family name|^surname|^last$|preferred (last name|surname|family name)"),
     ("full_name", r"^(full |legal |your |candidate )?name$|first and last name|\b(full|legal) (legal )?name\b"),
     ("email", r"e-?mail"),
     ("phone", r"phone|mobile|telephone|\bcell\b"),
     ("linkedin_url", r"linkedin"),
     ("github_url", r"github"),
     ("website_url", r"website|portfolio|personal (site|url|page)|\bblog\b"),
-    ("address", r"street address|address line|^address\b|mailing address"),
+    # "full home address", "Current Address", "Permanent Legal Address": the whole address on one line
+    ("full_address", r"full (home |current |mailing |residential )?address|(home|current|legal|residential|permanent|"
+                     r"mailing|physical) address"),
+    ("address", r"street address|address line|^address\b"),
+    ("gpa", r"^(what is |what was )?(your )?(cumulative |overall |undergraduate )?(gpa|grade point average)\b"),
+    ("certifications", r"certification"),
+    ("other_names", r"\balias(es)?\b|\bother names?\b|maiden name|former names?|previous(ly used)? names?|"
+                    r"names? (you have |you've )?(used|gone by)"),
     ("zip", r"zip|postal"),
     ("state", r"^(current |home |what )?state\b|what state|state are you|province|region"),
     ("country", r"^(current |home )?country\b|country of residence|country where you (currently )?(live|reside)|"
@@ -134,7 +144,7 @@ RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in
                             r"worked (for|at|with) .* (before|past|previously)|worked for .{0,80} previously|"
                             r"applied (to|with|at|for) .{0,80}(past|before|previously)"),
     ("has_relatives", r"\brelatives?\b(?!\s+to\b)|family member|\brelated to\b"),
-    ("referral_source", r"how did you (hear|find|learn)|where did you (hear|find)|referral source|source of application"),
+    ("referral_source", r"how did you (first )?(hear|find|learn)|where did you (hear|find)|referral source|source of application"),
     ("pronouns", r"pronoun"),
     ("sms_consent", r"\bsms\b|text message|whatsapp|receive (texts|messages)|text (you|me|us)\b"),
     ("eeo_hispanic", r"hispanic|latino|latinx"),
@@ -174,7 +184,7 @@ def classify(label: str) -> str:
             return "ambiguous"  # asks about authorization AND sponsorship in one question: not ours to merge
         if key == "needs_sponsorship" and re.search(r"authori[sz]ed to work|eligible to work|right to work", text):
             return "ambiguous"
-        if key == "has_relatives" and _CONSENT_NOTICE.search(text) and not re.search(r"relatives?|family member", text, re.I):
+        if key == "has_relatives" and _CONSENT_NOTICE.search(text) and not re.search(r"\brelatives?\b|family member", text, re.I):
             continue  # "...your data for purposes related to recruitment" is a consent notice, not a question about relatives
         if key == "country" and re.search(r"authori[sz]|eligible|right to work", text, re.I):
             continue  # "Your authorization to work in the country where you live" asks about authorization
@@ -191,7 +201,10 @@ _IDENTITY = {"first_name", "last_name", "full_name", "email", "phone", "address"
 
 _ELIGIBILITY = re.compile(r"citizen|immigration|visa|sponsor|authori[sz]|work rights|right to work|eligib|permanent resident|green card",
                           re.I)
-_CONSENT_NOTICE = re.compile(r"you consent|consent to|by submitting|personal data|privacy (policy|notice)", re.I)
+_NO_AI = re.compile(
+    r"(do not|don'?t|please don'?t|without)\s+(use|using)\s+(any\s+)?(ai|chatgpt|gpt|generative ai|llms?)\b|"
+    r"without (the )?(use of |using )?(ai|chatgpt|generative ai)\b|answer personally", re.I)
+_CONSENT_NOTICE = re.compile(r"\byou consent\b|\bconsent to\b|by submitting|personal data|privacy (policy|notice)", re.I)
 _YES_NO_QUESTION = re.compile(r"\s*(will|would|do|does|did|are|is|have|has|can|could|should)\b.*\?\s*$", re.I)
 # These ask for the place itself, so length does not turn them into an open question.
 _ASKS_FOR_PLACE = re.compile(
@@ -227,6 +240,9 @@ def _profile_value(key: str, ctx: Context) -> str:
         "years_experience": years_from_resume(ctx.resume, ctx.today),
         "school": p.education_school, "degree": p.education_degree,
     })
+    street, town = f.get("address", "").strip(), ", ".join(x for x in (f.get("city", ""), f.get("state", "")) if x)
+    if street and town:
+        table["full_address"] = f"{street}, {town}" + (f" {f.get('zip', '').strip()}" if f.get("zip", "").strip() else "")
     if key == "authorized_and_no_sponsorship":
         if not (p.work_authorization and p.needs_sponsorship):
             return ""
@@ -444,6 +460,8 @@ def choose_option(answer: str, options: list[Option], key: str = "") -> Option |
         pattern = dict(_ZONE_IN_QUESTION).get(answer, "")
         if pattern:
             hits = [o for o in options if re.search(pattern, o.label, re.I)]
+            if len(hits) > 1:  # "Eastern Time (US)" and "Eastern Europe": the American one
+                hits = [o for o in hits if re.search(r"\bUS\b|U\.S\.|United States|America|\btime\b", o.label, re.I)]
             if len(hits) == 1:
                 return hits[0]
     phrase = _phrase_option(answer, options, key)
@@ -485,7 +503,7 @@ def _decide(f: Field, ctx: Context) -> Decision:
             return Decision(FILL, RESUME_FILE, "profile") if ctx.has_resume else _unanswerable(f, "No resume file")
         if f.slot == "cover":
             return Decision(FILL, COVER_FILE, "profile") if ctx.has_cover else Decision(SKIP, reason="No cover letter file")
-        return _unanswerable(f, "Unknown attachment")
+        return _unanswerable(f, f"{UNKNOWN_FILE_REASON}: {label}")
 
     if f.value.strip() and f.kind not in {"radio", "checkbox"}:
         return Decision(SKIP, reason="Already filled")
@@ -499,7 +517,11 @@ def _decide(f: Field, ctx: Context) -> Decision:
 
     if _is_bot_check(f):
         # The options are "I am an AI" and "I am a human being". Leave it blank either way.
-        return _unanswerable(f, "This asks whether the submission is automated, so it is left blank")
+        return _unanswerable(f, BOT_CHECK_REASON)
+
+    if f.kind in {"text", "textarea"} and _NO_AI.search(label):
+        # "Please answer personally (without using AI)": the employer asked; the chat does not write it.
+        return _unanswerable(f, f"{NO_AI_REASON}: {label}")
 
     typed = _manual_answer(f, ctx)
     if typed:
@@ -509,6 +531,8 @@ def _decide(f: Field, ctx: Context) -> Decision:
 
     if _CONDITIONAL.search(label) and not f.required:
         return Decision(SKIP, reason="Follow-up that only applies to a previous answer")
+    if f.kind in {"text", "textarea"} and re.match(r"\s*if applicable\b", label, re.I) and key not in _PROFILE_KEYS:
+        return Decision(FILL, "N/A", "rule")  # "If applicable, please add context": a required box that applies to nothing
 
     if f.kind == "checkbox":
         return _checkbox(f, key, ctx)
@@ -578,6 +602,10 @@ def _decide(f: Field, ctx: Context) -> Decision:
                 return _unanswerable(f, f"No option matches '{answer}' for: {label}")
             return Decision(FILL, option.label, "facts")
         return Decision(FILL, answer, "profile" if key in _PROFILE_KEYS else "facts")
+
+    notice = _acknowledge_notice(f, ctx)
+    if notice is not None:
+        return Decision(FILL, notice.label, "rule")
 
     # no personal fact: the chat that wrote the resume answers it from the job and the resume.
     # Legal and identity questions never go there. A choice you already picked is kept.
@@ -727,6 +755,17 @@ def _none_of_the_above(f: Field, ctx: Context) -> Decision | None:
     return Decision(FILL, none.label, "facts")
 
 
+_ACK_OPTION = re.compile(r"\b(i )?(acknowledge|understand|have read|received this notice|confirm i have read)\b", re.I)
+
+
+def _acknowledge_notice(f: Field, ctx: Context) -> Option | None:
+    """A statement (not a question) whose list offers to acknowledge it: that option, when you tick acknowledgements."""
+    if not f.options or "?" in (f.label or "") or ctx.facts.get("agree_consents", "Yes") != "Yes":
+        return None
+    hits = [o for o in f.options if _ACK_OPTION.search(o.label) and not re.search(r"\b(do not|don't|not)\b", o.label, re.I)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _only_acknowledgement(f: Field) -> Option | None:
     """A consent notice whose list holds a single acceptance ("Accept", "I agree") leaves nothing to choose: that option."""
     consent = _CONSENT_NOTICE.search(f.label or "") or re.search(r"acknowledge|i agree|agree to|consent", f.label or "", re.I)
@@ -835,6 +874,8 @@ def _time_zone_decision(f: Field, ctx: Context) -> Decision:
     option = choose_option(answer, f.options, "time_zone")
     if option is None and f.kind == "combobox" and not f.options:
         return Decision(FILL, answer, "facts")
+    if option is None and ctx.chat_enabled and f.options:
+        return Decision(CHAT, source="chat")  # an unusual list (UTC offsets ...): the chat picks it from your facts
     if option is None:
         return _unanswerable(f, f"No option matches '{answer}' for: {label}")
     return Decision(FILL, option.label, "facts")

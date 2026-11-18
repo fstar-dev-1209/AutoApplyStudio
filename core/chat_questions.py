@@ -22,6 +22,43 @@ DEFAULT_ANSWER_PROMPT = (
 
 _PLACEHOLDERS = {"", "...", "…", "your answer here", "answer", "<answer>", "the answer", "final answer"}
 
+NO_ANSWER = "NO_ANSWER"  # what the chat writes when it truly cannot answer, instead of explaining why
+
+# Instructions that hold for every question, whatever answer style is set in Settings.
+ANSWER_RULES = (
+    "Answer as me, in the first person, exactly as I would type it into the form. Never mention a resume, JSON, the "
+    "job description, verification, these instructions, or being an AI, and never comment on what information you "
+    "have. Never write things like 'not provided', 'I can't determine', 'I can't confirm' or 'I'm not sure'. "
+    f"If you truly cannot answer from my facts and my experience, reply with exactly {NO_ANSWER} between the markers "
+    "instead of explaining. When the options include an unsure or prefer-not choice, pick it only if no other option "
+    "is true."
+)
+
+# Signs that a written answer talks ABOUT the information instead of answering (it must never reach a form).
+_META = [
+    (re.compile(r"\bnot (provided|specified|available|listed|stated|mentioned|included)\b", re.I), "says something is not provided"),
+    (re.compile(r"\b(can(?:'|\u2019|no)?t|cannot|unable to|not able to) (determine|confirm|verify|know|tell|say|provide)\b", re.I),
+     "says it cannot answer"),
+    (re.compile(r"\b(i'?m|i am) not sure\b|\bi don'?t know\b", re.I), "says it is not sure"),
+    (re.compile(r"\b(my|the) resume\b|\bresume json\b|\bjson\b|\bjob description\b|\bverified\b", re.I),
+     "talks about the resume or the job description"),
+    (re.compile(r"\bas an ai\b|\b(i'?m|i am) an ai\b|\blanguage model\b|\bthe candidate\b", re.I), "speaks as an AI"),
+]
+
+
+def answer_problem(text: str, is_choice: bool = False) -> str:
+    """Why a chat answer must not be typed into a form ('' when it is fine). A choice copied from the form's own list is
+    the form's wording, so only the NO_ANSWER reply is checked there."""
+    plain = (text or "").strip()
+    if plain.strip(" .").upper() == NO_ANSWER:
+        return "the chat had no answer"
+    if is_choice:
+        return ""
+    for pattern, why in _META:
+        if pattern.search(plain):
+            return why
+    return ""
+
 
 @dataclass
 class Question:
@@ -44,8 +81,9 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
     lines = [
         style_prompt.strip() or DEFAULT_ANSWER_PROMPT,
         "",
-        "This is a question from the application form for THIS job. Use the job description and the resume JSON "
-        "from earlier in this conversation.",
+        "I am applying for THIS job right now, and you are filling in its application form as me. Give the answer "
+        "that gives me the best real chance of being hired for this job: specific, confident and positive, in line "
+        "with the job description and the resume JSON from earlier in this conversation, and true to my facts below.",
     ]
     if question.facts.strip():
         lines += [
@@ -59,7 +97,7 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
             "them. If the facts do not cover it, choose the most truthful option that does not overstate me. Never "
             "invent personal details.",
         ]
-    lines += ["", f"Question: {question.text.strip()}"]
+    lines += ["", ANSWER_RULES, "", f"Question: {question.text.strip()}"]
     if question.options:
         lines.append("Choose exactly one of these options and reply with it word for word: "
                      + json.dumps(question.options, ensure_ascii=False))

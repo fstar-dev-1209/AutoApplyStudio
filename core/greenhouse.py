@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from core.chat_questions import Question, clean_answer, match_option
+from core.chat_questions import NO_ANSWER, Question, answer_problem, clean_answer, match_option
 from core.salary_answer import figure_in, pick_bucket
 from core.salary_answer import render as render_salary
 from core.form_answers import CHAT, FILL, NEEDS, OPTIONAL_REASON, SKIP, Context, Decision, Field, decide
@@ -307,6 +307,19 @@ class GreenhouseApplier:
         text = clean_answer(raw, f.max_chars)
         if not text:
             return Decision(NEEDS if f.required else SKIP, reason=f"The chat gave no usable answer to: {f.label}")
+        problem = answer_problem(text, bool(choices))
+        if problem and problem != "the chat had no answer":
+            # It wrote about the information instead of answering ("Address not provided"): ask once more, plainly.
+            retry = replace(question, hint=(f"Your previous answer {text[:80]!r} commented on the information instead of "
+                                            f"answering. Answer as me, or reply {NO_ANSWER}."))
+            try:
+                text = clean_answer(self.answer(retry), f.max_chars)
+            except Exception:  # noqa: BLE001
+                text = ""
+            problem = answer_problem(text, bool(choices)) if text else "the chat had no answer"
+        if problem:
+            # Never typed in: an optional question is left blank, a required one waits for you.
+            return Decision(NEEDS if f.required else SKIP, reason=f"No usable answer from the chat ({problem}): {f.label}")
         if choices:  # the answer must be one of the form's own options, word for word
             picked = match_option(text, choices) or match_option(str(raw), choices)
             if not picked:

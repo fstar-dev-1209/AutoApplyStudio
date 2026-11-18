@@ -838,3 +838,26 @@ def test_saving_settings_restyles_and_redraws_only_when_the_look_changed(window,
     window.settings_store.settings.density = "compact" if window.settings_store.settings.density != "compact" else "comfortable"
     window._on_settings_saved()
     assert calls == [1]
+
+
+def test_closing_from_the_window_asks_first_and_a_no_keeps_it_open(window, monkeypatch):
+    import ui.main_window as mw
+
+    class Close:
+        def __init__(self, spontaneous):
+            self._spontaneous, self.ignored = spontaneous, False
+
+        def spontaneous(self):
+            return self._spontaneous
+
+        def ignore(self):
+            self.ignored = True
+
+        def accept(self):
+            pass
+
+    asked = []
+    monkeypatch.setattr(mw, "ask_yes_no", lambda *a, **k: asked.append(a[1]) or False)
+    event = Close(spontaneous=True)
+    window.closeEvent(event)
+    assert asked == ["Close Auto Apply Studio?"] and event.ignored and not getattr(window, "_closing", False)
