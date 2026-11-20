@@ -31,7 +31,7 @@ def test_choice_questions_list_the_options_verbatim():
 
 def test_context_prompt_has_job_and_resume():
     text = build_context_prompt(job_description="Build RAG.", resume_json={"name": "A"}, company="Acme", role="ML Eng")
-    assert "ML Eng" in text and "Acme" in text and "Build RAG." in text and '"name": "A"' in text
+    assert "ML Eng" in text and "Acme" in text and "Build RAG." in text and '"name":"A"' in text
 
 
 def test_answer_is_lifted_from_between_the_markers():
@@ -241,7 +241,8 @@ def test_every_question_carries_the_facts_and_an_unmarked_reply_is_still_taken()
     answer = make_answer_fn(job, ask, facts_text="- Work status (text): US citizen", log=logged.append)
     got = answer(Question("Are you a citizen?", options=["Yes", "No"], kind="choice"))
     assert got == "No"
-    assert "US citizen" in seen[0][0] and "US citizen" in seen[0][1]
+    assert "US citizen" in seen[0][1]  # a new chat: the facts come once, in its first message
+    assert "US citizen" not in seen[0][0]
     assert any("no markers" in m for m in logged)
 
 
@@ -290,3 +291,36 @@ def test_answers_that_talk_about_the_information_are_caught():
         assert answer_problem(good) == "", good
     assert answer_problem("I'm Not Sure", is_choice=True) == ""  # the form's own option
     assert ANSWER_RULES in build_question_prompt(Question("Why us?"))
+
+
+def test_the_first_message_of_a_question_chat_stays_short():
+    from core.chat_questions import MAX_DESCRIPTION_CHARS, compact_resume
+
+    resume = {"name": "A", "cover_letter": "Dear team, " * 300, "summary": "", "experience": [{"company": "Acme"}]}
+    packed = compact_resume(resume)
+    assert "cover_letter" not in packed and '"summary"' not in packed and ", " not in packed
+    context = build_context_prompt(job_description="word " * 4000, resume_json=resume, company="Co", role="Dev",
+                                   facts="- Name: A")
+    description = context.split("JOB DESCRIPTION:\n", 1)[1].split("\n\nMY RESUME", 1)[0]
+    assert len(description) <= MAX_DESCRIPTION_CHARS + 2 and description.endswith("…")
+    assert "- Name: A" in context and '"company":"Acme"' in context
+
+
+def test_the_resume_rules_are_given_only_when_the_resume_is_built_on_the_real_history():
+    from core.chat_questions import RESUME_RULES
+
+    q = Question("Do you have 5+ years of Python?", options=["Yes", "No"], kind="choice")
+    assert RESUME_RULES not in build_question_prompt(q)
+    with_rules = build_question_prompt(Question(q.text, q.options, kind="choice", from_resume=True))
+    assert RESUME_RULES in with_rules and with_rules.index(RESUME_RULES) < with_rules.index("Question:")
+    assert "Never add an employer" in RESUME_RULES and "honest No" in RESUME_RULES
+
+
+def test_typed_answers_get_the_writing_style_and_machine_sounding_words_are_found():
+    from core.chat_questions import WRITING_STYLE, ai_tells
+
+    assert WRITING_STYLE in build_question_prompt(Question("Why do you want to work here?"))
+    assert WRITING_STYLE not in build_question_prompt(Question("Remote?", options=["Yes", "No"], kind="choice"))
+    assert ai_tells("I'm passionate about leveraging robust, seamless systems. Moreover, I delve deep.") == [
+        "passionate", "leveraging", "robust", "seamless", "moreover", "delve"]
+    assert ai_tells("I built the billing service at Acme and cut failed payments by half.") == []

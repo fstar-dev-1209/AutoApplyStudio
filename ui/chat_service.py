@@ -57,6 +57,8 @@ class ChatService(QObject):
         # Paste as plain text (Ctrl+Shift+V): ChatGPT then takes the message as typing, never as a "Pasted text" file.
         # Set on the application-questions page (see ClaudeChatView).
         self.plain_paste = False
+        self.label_suffix = ""  # " (questions account)" on the page signed in to the questions account
+        self.last_copied_text = ""  # the last reply its Copy button gave
         self.site: ChatSite = site or SITES[CLAUDE]
         self._busy = False
         self._progress: ProgressFn | None = None
@@ -71,7 +73,8 @@ class ChatService(QObject):
 
     @property
     def label(self) -> str:
-        return self.site.label
+        # "ChatGPT (questions account)" for the questions page, so a message says which account needs attention
+        return self.site.label + self.label_suffix
 
     def replace_page(self, page: QWebEnginePage) -> None:
         """Drive a fresh page from now on (the old one is being recycled to free its memory; see ClaudeChatView)."""
@@ -195,6 +198,7 @@ class ChatService(QObject):
         # Only text the Copy click just put on the clipboard. Whatever was already there belongs to some other copy.
         if not clip or clip == before:
             return ""
+        self.last_copied_text = clip  # the whole reply as copied: also a reply with no JSON in it (see the coordinator)
         return find_resume_json_string(clip)
 
     def _note(self, message: str) -> None:
@@ -385,6 +389,12 @@ class ChatService(QObject):
 
     def _ensure_new_chat(self) -> str:
         if not self.load_url(self.site.new_chat):
+            # Say why: a human check, the usage limit or a sign-out shows as a page without a message box, and calling
+            # that "could not open a conversation" hid what needed doing.
+            state, err = self._run_page_state()
+            blocked = str(state.get("blocked") or "") if not err else ""
+            if blocked in PAGE_BLOCKS or (not err and state and not state.get("loggedIn")):
+                return self._sign_in_message(state)
             ready = self._document_ready()
             return (f"Could not open a new {self.label} conversation "
                     f"(page at {self.current_url() or 'unknown'}, document {ready or 'not ready'}).")
@@ -394,7 +404,7 @@ class ChatService(QObject):
         """Empty the message box (text and any attached cards). ChatGPT keeps an unsent draft between visits, and a
         draft left from another job must never be sent as this job's prompt."""
         self._run_js(
-            "(() => { const c = document.querySelector('#prompt-textarea, div.ProseMirror[contenteditable=\"true\"], "
+            "(() => { const visible = sels => { const all = Array.from(document.querySelectorAll(sels)); return all.find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }) || all[0] || null; }; const c = visible('#prompt-textarea, div.ProseMirror[contenteditable=\"true\"], "
             "textarea'); if (!c) return 'none'; const scope = c.closest('form') || document; "
             "scope.querySelectorAll('button').forEach(b => { const l = (b.getAttribute('aria-label') || '').toLowerCase(); "
             "if (/^remove|remove (file|attachment)|delete file/.test(l)) b.click(); }); c.focus(); "
@@ -488,7 +498,10 @@ class ChatService(QObject):
             blocked = self._page_block(before)
             if blocked:
                 return blocked
-            wake_err = self._wake_send_button(prompt)
+            # The questions page puts the text in by script first: it needs neither the clipboard nor an active window,
+            # so it also works with nobody signed in to the server's screen, where a paste lands nothing.
+            inserted = self.plain_paste and self._insert_by_script(prompt)
+            wake_err = "" if inserted else self._wake_send_button(prompt)
             if wake_err:
                 return wake_err
         else:
@@ -547,6 +560,11 @@ class ChatService(QObject):
             threshold = max(20, min_ok // 2)
             composer_full = self._composer_length(state) >= threshold
             if composer_full and clicks < 3:
+                if not state.get("canSend") and clicks:
+                    # Our click is being taken: Send goes off while the message posts, then the box empties. Watch for
+                    # that (or for Send to come back on, if the click did not take) instead of waiting for Send here.
+                    self._pump_events(700)
+                    continue
                 if not state.get("canSend"):
                     state, wait_err, _ok = self._wait_send_enabled(30, 500)
                     if wait_err:
@@ -645,6 +663,22 @@ class ChatService(QObject):
         view.setFocus()
         self._pump_events(200)
 
+    def _insert_by_script(self, prompt: str) -> bool:
+        """Put ``prompt`` into the message box by script and wait for Send. False (the box emptied again) when it did not
+        take, so the caller pastes instead."""
+        self._reveal_chat()
+        raw, err = self._run_js(self.site.insert_prompt_js.replace("%PROMPT%", json.dumps(prompt)),
+                                timeout_ms=max(60000, min(180000, len(prompt) // 20)))
+        if err:
+            return False
+        state, err, ok = self._wait_send_enabled(10, 300)
+        if ok and int(state.get("composerLength") or 0) >= int(len(prompt) * 0.9):
+            self._note(f"Prompt put into {self.label}.")
+            return True
+        self._clear_composer()  # never leave half a prompt for the paste to land on top of
+        self._pump_events(500)
+        return False
+
     def _wake_send_button(self, prompt: str) -> str:
         """Turn Send on by pasting with a real keystroke. Returns an error, or '' once the button is enabled.
 
@@ -714,8 +748,12 @@ class ChatService(QObject):
                     break  # the paste took but Send never turned on: stop, do not paste it again
         finally:
             clipboard.setText(previous)
-        detail = (f" (box holds {int(seen.get('composerLength') or 0):,} of {len(prompt):,} characters"
+        held = int(seen.get('composerLength') or 0)
+        detail = (f" (box holds {held:,} of {len(prompt):,} characters"
                   f"{', a reply is still being written' if seen.get('isGenerating') else ''})")
+        if held < 5 and not int(seen.get("attachments") or 0):
+            return (f"{self.label} left Send disabled: the prompt did not go into the message box (the window could not "
+                    f"take the paste).{detail}")
         return (f"{self.label} left Send disabled. The prompt is in the box, "
                 f"but the page did not accept it as typing.{detail}")
 
@@ -731,7 +769,9 @@ class ChatService(QObject):
             state, err = self._run_page_state()
             if err:
                 return state, err, False
-            if state.get("canSend"):
+            # Send counts only with our text in the box: ChatGPT shows a button there even when the box is empty, and
+            # taking that for success clicked Send on nothing ("cleared the composer but no reply started").
+            if state.get("canSend") and self._box_holds_paste(state):
                 return state, "", True
             if int(state.get("attachments") or 0) > 0 and not extended:
                 extended = True
@@ -741,7 +781,7 @@ class ChatService(QObject):
     def _composer_has_focus(self) -> bool:
         """Focus the composer and select its own text. Never selects the page, which is what reloads ChatGPT."""
         raw, err = self._run_js(
-            "(() => { const c = document.querySelector('#prompt-textarea, textarea, "
+            "(() => { const visible = sels => { const all = Array.from(document.querySelectorAll(sels)); return all.find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }) || all[0] || null; }; const c = visible('#prompt-textarea, textarea, "
             "div.ProseMirror[contenteditable=\"true\"], div[contenteditable=\"true\"]'); "
             "if (!c) return 'missing'; c.focus(); "
             "if (c.select) c.select(); else { const range = document.createRange(); "
@@ -756,7 +796,7 @@ class ChatService(QObject):
     def _click_composer(self, view) -> bool:
         """A real click in the message box, so the following keys go there and not to the whole page."""
         raw, err = self._run_js(
-            "(() => { const c = document.querySelector('#prompt-textarea, textarea, "
+            "(() => { const visible = sels => { const all = Array.from(document.querySelectorAll(sels)); return all.find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }) || all[0] || null; }; const c = visible('#prompt-textarea, textarea, "
             "div.ProseMirror[contenteditable=\"true\"], div[contenteditable=\"true\"]'); "
             "if (!c) return ''; const r = c.getBoundingClientRect(); "
             "if (r.width < 4 || r.height < 4) return ''; "
@@ -805,11 +845,27 @@ class ChatService(QObject):
                            | (Qt.KeyboardModifier.ShiftModifier if self.plain_paste else Qt.KeyboardModifier.NoModifier))
         except RuntimeError:
             pass
+        # One paste only. Both ways of pressing the keys used to run one after the other, and when both worked the
+        # prompt went in twice (twice as long, so ChatGPT made a "Pasted text" card of it and kept Send off while it
+        # loaded). The Windows keys are pressed only when the Qt keys put nothing in the box.
+        if self._paste_landed(3.0):
+            return
         import sys
         if sys.platform == "win32":
             self._win_chord(target, 0x41)  # A, inside the focused message box
             self._pump_events(40)
             self._win_chord(target, 0x56, shift=self.plain_paste)  # V (Shift+V: as plain text)
+
+    def _paste_landed(self, seconds: float) -> bool:
+        """True once the message box holds a paste (its text, or a "Pasted text" card), looking for up to ``seconds``."""
+        deadline = time.monotonic() + seconds
+        while True:
+            state, err = self._run_page_state()
+            if not err and self._box_holds_paste(state):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self._pump_events(400)
 
     def _win_chord(self, widget, vk: int, *, shift: bool = False) -> None:
         import ctypes

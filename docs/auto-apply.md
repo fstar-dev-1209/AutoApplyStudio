@@ -109,14 +109,31 @@ which is why. Links never unfold into a preview card.
 responding again*, with the free memory on the server. It never starts the app again: start it yourself with
 `Run Auto Apply Studio.bat`.
 
-**Memory.** A chat page that stays open keeps growing. An idle page above 1.5 GB is replaced by a fresh one (checked
-every minute, never while it is writing a resume or answering a question).
+**Memory.** A chat page that stays open keeps growing. An idle page above 1.5 GB is replaced by a fresh one (checked every minute, never while it is writing a resume or answering a question).
+
+**Closing** asks first, then ends the app at once: it never waits for a job in progress, which is recorded as
+interrupted and tried again at the next start.
 
 **Only what truly needs you waits for you.** A stop caused only by temporary problems (the chat page or the browser
 was busy or closed, a click timed out, the security-code email was late) is recorded as a failure and retried by
 itself after 30 minutes. A form the bot must not or cannot complete (it asks whether the application is automated,
 asks for answers written without AI, or wants a document the app cannot make) is skipped for good, with a ⏭
 *APPLICATION SKIPPED* message. A job that stops on the same thing twice is set aside.
+
+**Where the application questions are asked.** In a ChatGPT tab of the bot browser (the Chrome that fills the
+forms): one tab per application, opened when the form has its first question for the chat and closed when the
+application is done. It runs on the browser's own thread, types into the page through the browser (no clipboard,
+no window focus) and never touches the app window. Sign in once to the ChatGPT account for questions in the bot
+browser (Auto Apply > Open the bot browser > chatgpt.com). Resumes are still written in the app's ChatGPT tab, with
+its own account. Settings key `question_chat`: `chrome` (default) or `app` (the earlier questions pane in the app).
+
+**Where the questions are asked.** With your real work history saved in Settings (every resume then names only your
+real employers), each application's questions get a new chat of their own. Its first message holds the job
+description (up to 6,000 characters), your resume for that job (compact, without the cover letter) and your facts;
+the rest of the form's questions continue in that chat. Only saved answers about you as a person (relocation, start
+date, travel, address, work authorization, checks) are reused; experience and skill questions are always answered
+from that job's resume. Without a work history, the questions are asked in the conversation that wrote the resume.
+The prompt is pasted once, as plain text, and sent only when it is really in the message box.
 
 **Answers the chat writes are checked before they are typed in.** An answer that talks about the information instead
 of answering ("Address not provided", "I can't determine…", "my resume", "as an AI") is asked for once more; if it

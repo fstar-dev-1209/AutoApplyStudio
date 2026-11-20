@@ -15,16 +15,70 @@ END = "[[ANSWER_END]]"
 
 DEFAULT_ANSWER_PROMPT = (
     "Write the answer exactly as a real person would type it by hand in a professional setting: natural, specific "
-    "and concise, in the first person. Make it the best fit for this job description and for the resume JSON you "
-    "generated for this job. Never invent an employer, title, date, degree, tool, metric or project that is not "
-    "in that resume JSON."
+    "and concise, in the first person. Make it the best fit for this job description and for my resume JSON for "
+    "this job. Never invent an employer, title, date, degree, tool, metric or project that is not in that resume "
+    "JSON."
 )
 
 _PLACEHOLDERS = {"", "...", "…", "your answer here", "answer", "<answer>", "the answer", "final answer"}
 
+# How a typed answer (not a choice from a list) is written: the way a confident engineer types their own answer, in
+# the plain, direct tone Steve Jobs and Bill Gates use when they talk about their work.
+WRITING_STYLE = (
+    "HOW TO WRITE IT\n"
+    "- Write it the way I would type it myself: plain everyday words, short sentences, one idea per sentence.\n"
+    "- Be concrete: what I built or did, for whom, and what changed because of it. Facts over adjectives.\n"
+    "- The tone of Steve Jobs and Bill Gates when they talk about their work: simple, direct, specific and quietly "
+    "confident. No hype, no buzzwords, no flattery of the company.\n"
+    "- Active voice, first person. Contractions are fine. Vary sentence length a little, as people do.\n"
+    "- Do not use these words or phrases: delve, leverage, utilize, spearhead, passionate, thrilled, excited to, eager "
+    "to, robust, seamless, cutting-edge, innovative, synergy, dynamic, fast-paced, tapestry, landscape, realm, journey, "
+    "testament, pivotal, crucial, meticulous, foster, empower, elevate, harness, navigate, moreover, furthermore, "
+    "additionally, in conclusion, overall, it's worth noting, I'm confident that.\n"
+    "- No dashes as punctuation, no lists of three adjectives, no rhetorical questions, no summary sentence at the end."
+)
+
+# Words that make a typed answer read as machine-written (see WRITING_STYLE). Found in an answer, it is asked for again.
+_AI_TELLS = re.compile(
+    r"\b(delv(e|es|ed|ing)|leverag(e|es|ed|ing)|utiliz(e|es|ed|ing)|spearhead(ed|ing)?|passionate|thrilled|"
+    r"excited to|eager to|robust|seamless(ly)?|cutting-edge|innovative|synerg(y|ies)|fast-paced|tapestry|landscape|"
+    r"realm|testament|pivotal|meticulous(ly)?|foster(ed|ing)?|empower(ed|ing|s)?|elevat(e|ed|ing)|harness(ed|ing)?|"
+    r"moreover|furthermore|additionally|in conclusion|it'?s worth noting|i'?m confident that)\b", re.I)
+
+
+def ai_tells(text: str) -> list[str]:
+    """The machine-sounding words in a typed answer, each once, in the order they appear."""
+    seen: list[str] = []
+    for m in _AI_TELLS.finditer(text or ""):
+        word = m.group(0).lower()
+        if word not in seen:
+            seen.append(word)
+    return seen
+
 NO_ANSWER = "NO_ANSWER"  # what the chat writes when it truly cannot answer, instead of explaining why
 
 # Instructions that hold for every question, whatever answer style is set in Settings.
+# How to answer experience and skill questions from the resume, when that resume is built on your real work history
+# (Settings > work history). The chat answers every such question from the resume: years added up across roles,
+# reasonable conclusions from the work described, the closest option of a list, an honest No when the resume plainly
+# lacks something. It never adds anything to the resume.
+RESUME_RULES = (
+    "HOW TO ANSWER FROM MY RESUME\n"
+    "- My resume above is built on my real work history. Answer experience and skill questions from it, the way I "
+    "would answer them in an interview.\n"
+    "- Years of experience with a skill: add up the time of every role in which the resume shows that skill (count "
+    "overlapping roles once). Total experience: from my first role to today.\n"
+    "- Draw reasonable conclusions from the work the resume describes: work that clearly involves something counts as "
+    "experience with it (incident response and production support mean on-call; teams in several countries mean "
+    "distributed teams; building APIs on a cloud platform means that cloud).\n"
+    "- Never add an employer, title, date, degree, tool, metric or project that is not in the resume.\n"
+    "- A list of ranges or levels: choose the option closest to what the resume supports.\n"
+    "- A yes/no question: Yes when the resume shows it or it follows directly from it; No when the resume plainly lacks "
+    "it. An honest No is an answer: do not reply NO_ANSWER to a question you can answer No to.\n"
+    "- A written answer: use real work from the resume, framed for this job, specific and in the first person.\n"
+    f"- Reply NO_ANSWER only when nothing in my resume or my facts relates to the question at all."
+)
+
 ANSWER_RULES = (
     "Answer as me, in the first person, exactly as I would type it into the form. Never mention a resume, JSON, the "
     "job description, verification, these instructions, or being an AI, and never comment on what information you "
@@ -71,6 +125,7 @@ class Question:
     extra: dict = field(default_factory=dict)  # kind "salary": the facts the prompt states (see core.salary_answer)
     figure: int = 0  # kind "salary" with options: the yearly figure the option must contain
     facts: str = ""  # the personal facts block (core.personal_facts): true, and never to be contradicted
+    from_resume: bool = False  # answer experience questions by the RESUME_RULES (the resume is your real history)
 
 
 def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER_PROMPT) -> str:
@@ -97,7 +152,10 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
             "them. If the facts do not cover it, choose the most truthful option that does not overstate me. Never "
             "invent personal details.",
         ]
-    lines += ["", ANSWER_RULES, "", f"Question: {question.text.strip()}"]
+    lines += ["", ANSWER_RULES]
+    if question.from_resume:
+        lines += ["", RESUME_RULES]
+    lines += ["", f"Question: {question.text.strip()}"]
     if question.options:
         lines.append("Choose exactly one of these options and reply with it word for word: "
                      + json.dumps(question.options, ensure_ascii=False))
@@ -105,6 +163,8 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
         lines.append(question.hint.strip())
     if question.kind == "number":
         lines.append("Reply with a single number only.")
+    if not question.options and question.kind == "text":
+        lines += ["", WRITING_STYLE]
     if question.max_chars:
         lines.append(f"The answer must be at most {question.max_chars} characters including spaces.")
     lines += [
@@ -116,15 +176,32 @@ def build_question_prompt(question: Question, style_prompt: str = DEFAULT_ANSWER
     return "\n".join(lines)
 
 
+# The first message of a question chat is kept well under the length at which ChatGPT turns a paste into a "Pasted
+# text" card (about 20,000 characters for this kind of text): the description is cut at this length, and the resume
+# is sent compact and without its cover letter (the letter is typed into its own field, never used for answers).
+MAX_DESCRIPTION_CHARS = 6000
+_NOT_FOR_ANSWERS = ("cover_letter",)
+
+
+def compact_resume(resume_json: dict) -> str:
+    """The resume as compact JSON, without the parts that do not help answer form questions."""
+    kept = {k: v for k, v in (resume_json or {}).items() if k not in _NOT_FOR_ANSWERS and v not in ("", None, [], {})}
+    return json.dumps(kept, ensure_ascii=False, separators=(",", ":"))
+
+
 def build_context_prompt(*, job_description: str, resume_json: dict | None, company: str, role: str,
                          facts: str = "") -> str:
-    """Sent first when a job has no saved conversation (or it is gone), so a new chat has the same grounding."""
-    resume = json.dumps(resume_json, ensure_ascii=False) if resume_json else "(not available)"
+    """The first message of the chat that answers a job's application questions: the job, my resume for it, and my
+    personal facts. The questions follow one by one in the same chat."""
+    resume = compact_resume(resume_json) if resume_json else "(not available)"
+    description = job_description.strip()
+    if len(description) > MAX_DESCRIPTION_CHARS:
+        description = description[:MAX_DESCRIPTION_CHARS].rsplit(" ", 1)[0] + " …"
     text = (
-        f"I am applying for the {role or 'role'} position at {company or 'this company'}. I will ask you the "
-        "questions from the application form, one by one.\n\n"
-        f"JOB DESCRIPTION:\n{job_description.strip()}\n\n"
-        f"MY RESUME JSON FOR THIS JOB:\n{resume}\n"
+        f"I am applying for the {role or 'role'} position at {company or 'this company'} right now. You are helping me "
+        "fill in its application form: I will send you its questions one by one, and you answer each one as me.\n\n"
+        f"JOB DESCRIPTION:\n{description}\n\n"
+        f"MY RESUME FOR THIS JOB (JSON):\n{resume}\n"
     )
     if facts.strip():
         text += f"\nMY PERSONAL FACTS (true, from my own settings):\n{facts.strip()}\n"

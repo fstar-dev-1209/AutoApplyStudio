@@ -24,6 +24,7 @@ from core.discovery_runner import within_hours
 from core.form_answers import BOT_CHECK_REASON, NO_AI_REASON, UNKNOWN_FILE_REASON, Context
 from core.form_filler import Files
 from core.job_order import application_order, posting_times
+from core.chrome_chat import ChromeChat
 from core.personal_facts import facts_for
 from core.salary_answer import pay_context_for
 from core.greenhouse import (
@@ -36,12 +37,16 @@ from core.settings_store import GENERATION_CLAUDE_CHAT, AppSettings
 OFF, IDLE, RUNNING, WAITING, STOPPED = "off", "idle", "running", "waiting", "stopped"
 RETRY_FAILED_AFTER = timedelta(minutes=30)
 DISMISSED = "dismissed"  # set aside for good: never picked again
+CHAT_LIMIT_PAUSE = timedelta(hours=1)  # after the chat's usage limit shows, applying waits this long
+CHAT_CHECK_PAUSE = timedelta(minutes=15)  # a human check or a sign-out: applying looks again after this long
 
 # A stop that a later try usually gets past (the chat page or the browser was busy or closed, a click timed out, the
 # security-code email was late). Such a stop is recorded as a failure, which is retried by itself after a while.
 _TRANSIENT = re.compile(
     r"The app did not respond|page did not respond|TargetClosedError|TimeoutError|security code email did not arrive|"
-    r"cleared the composer but no reply started|left Send disabled|took too long to answer|ERR_INSUFFICIENT_RESOURCES",
+    r"cleared the composer but no reply started|left Send disabled|took too long to answer|ERR_INSUFFICIENT_RESOURCES|"
+    r"used too much memory|Could not open a new \w+ conversation|Send is disabled|did not accept it as typing|"
+    r"Timed out waiting for \w+ to answer|chat page stayed busy|did not answer in time|usage limit",
     re.I)
 # A form the bot must not complete, or cannot: the job is skipped for good, without waiting for you.
 _AUTO_SKIP = (
@@ -187,6 +192,7 @@ class ApplyRunner:
         self._rng = rng or random.Random()
         self._mail = mail  # object with snapshot(context) / fetch(context, before, company), or None
         self._debug_log = debug_log
+        self._paused_until: datetime | None = None  # set when the chat's usage limit shows (see _settle)
         self._save_settings = save_settings
         self._reporter = reporter  # core.reports.Reporter or None
         self.status = ApplyStatus()
@@ -351,6 +357,11 @@ class ApplyRunner:
         if not within_hours(self._now(), s.bot_timezone, s.active_start_hour, s.active_end_hour):
             self.status.state, self.status.message = WAITING, "Outside the active hours."
             return None
+        if self._paused_until is not None and self._now() < self._paused_until:
+            self.status.state = WAITING
+            self.status.message = (f"Waiting for the chat page (usage limit, human check or sign-in) until "
+                                   f"{self._paused_until.strftime('%H:%M')}.")
+            return None
         submit = s.apply_mode == "auto"
         start, end = self._tz_day(s)
         done_today = self.attempts.submitted_between(start, end)
@@ -394,6 +405,19 @@ class ApplyRunner:
         for marker, why in _AUTO_SKIP:
             if marker in reason:
                 return replace(outcome, state=DISMISSED, reason=f"Skipped automatically: {why}. ({reason[:300]})")
+        if re.search(r"usage limit", reason, re.I):
+            # Every question needs the chat, and its limit lasts a while: wait, then carry on by itself.
+            self._paused_until = self._now() + CHAT_LIMIT_PAUSE
+            self._alert("Chat usage limit", f"The chat is showing its usage limit. Applying waits until "
+                                            f"{self._paused_until.strftime('%H:%M')} and then carries on by itself.")
+            return replace(outcome, state=FAILED)
+        if re.search(r"human-verification check|Not signed in to", reason, re.I):
+            # Only a person can do this. Applying looks again every 15 minutes instead of stopping job after job.
+            self._paused_until = self._now() + CHAT_CHECK_PAUSE
+            what = "a human-verification check" if "verification" in reason else "signed out"
+            self._alert("Chat needs you", f"The chat page is {what}. Open the ChatGPT tab in the app and complete it; "
+                                          "applying carries on by itself afterwards (it looks again every 15 minutes).")
+            return replace(outcome, state=FAILED)
         parts = [p for p in (outcome.needs or re.split(r";\s+", reason)) if p.strip()]
         if parts and all(_TRANSIENT.search(p) for p in parts):
             return replace(outcome, state=FAILED)
@@ -405,6 +429,7 @@ class ApplyRunner:
     def _run_in_browser(self, job: JobItem, s: AppSettings, submit: bool) -> ApplyOutcome:
         files = pick_files(job)
         chat = self._ask_chat if (self._ask_chat is not None and s.generation_mode == GENERATION_CLAUDE_CHAT) else None
+        chrome_chat: ChromeChat | None = None
         pending: list[tuple[str, list[str]]] = []
         form_ctx = Context(
             profile=s.profile, facts={**DEFAULTS, **s.apply_facts}, chat_enabled=chat is not None,
@@ -414,7 +439,19 @@ class ApplyRunner:
             pay=pay_context_for(job, s))
         answer = None
         if chat is not None:
-            answer = make_answer_fn(job, chat, style_prompt=s.answer_prompt, facts_text=facts_for(form_ctx),
+            # With your real work history saved, every resume names only your real employers (anything else is refused),
+            # so the questions get a fresh chat with the job, that resume and your facts. Without it, they are asked
+            # in the conversation that wrote the resume, as before.
+            fresh = True
+            # Experience questions are answered from the resume by RESUME_RULES only when that resume is built on your
+            # real work history: every employer in it is then one of yours (a resume naming any other is refused).
+            from_resume = True
+            if s.question_chat == "chrome":
+                # Asked in a ChatGPT tab of the bot browser itself, on its own thread (core.chrome_chat).
+                chrome_chat = ChromeChat(log=self._debug_log)
+                chat = chrome_chat.ask
+            answer = make_answer_fn(job, chat, style_prompt=s.answer_prompt, facts_text=facts_for(form_ctx), fresh=fresh,
+                                    from_resume=from_resume,
                                     log=self._debug_log, on_conversation=lambda url, jid=job.id: self._remember_chat(jid, url))
         applier = self._factory(answer=answer, shots_dir=self._shots, notify=self._alert,
                                 should_stop=self._kill.is_set, mail=self._mail, debug_log=self._debug_log)
@@ -425,10 +462,18 @@ class ApplyRunner:
         applier.remember = remember  # type: ignore[attr-defined]
         url = job.origin_url or job.url
         host = self._host()
+        def task(ctx):
+            if chrome_chat is not None:
+                chrome_chat.bind(ctx)
+            try:
+                return applier.apply(ctx, url, form_ctx=form_ctx, files=files, submit=submit,
+                                     tag=job.id[:8], company=job.company, role=job.role_title)
+            finally:
+                if chrome_chat is not None:
+                    chrome_chat.close()  # the application's ChatGPT tab goes, and its memory with it
+
         try:
-            return host.run(lambda ctx: applier.apply(ctx, url, form_ctx=form_ctx, files=files, submit=submit,
-                                                      tag=job.id[:8], company=job.company, role=job.role_title),
-                            timeout=1800)
+            return host.run(task, timeout=1800)
         finally:
             self._keep_questions(s, pending)
 

@@ -168,6 +168,9 @@ class AppSettings:
     salary_band_high: int = 55  # ... up to this far; the lower-middle, to get replies
     discovery_skip_below_floor: bool = True  # do not queue a job whose posted pay tops out below your minimum
     apply_skip_optional: bool = True  # questions the form does not require are left blank, never answered
+    # Where application questions are asked: "chrome", a ChatGPT tab in the bot browser (core.chrome_chat), or "app",
+    # the questions page inside the app (the earlier way, kept as a fallback).
+    question_chat: str = "chrome"
     notify_reports: bool = True  # status reports (job search, resumes, applications, answers) to Telegram/Discord
     apply_facts: dict[str, str] = field(default_factory=dict)  # see core.apply_facts; sealed with the app password
     form_questions: list[dict[str, Any]] = field(default_factory=list)  # a form's own choices, once it has asked; sealed too
@@ -271,6 +274,7 @@ class AppSettings:
             salary_band_high=max(_clamp(data.get("salary_band_high"), 0, 100, 55), _clamp(data.get("salary_band_low"), 0, 100, 40)),
             discovery_skip_below_floor=bool(data.get("discovery_skip_below_floor", True)),
             apply_skip_optional=bool(data.get("apply_skip_optional", True)),
+            question_chat="app" if str(data.get("question_chat") or "chrome") == "app" else "chrome",
             notify_reports=bool(data.get("notify_reports", True)),
             apply_facts=clean_facts(data.get("apply_facts")),
             form_questions=clean_form_questions(data.get("form_questions")),

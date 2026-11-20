@@ -92,6 +92,7 @@ SITES: dict[str, ChatSite] = {
         click_copy_js=gpt.CHATGPT_CLICK_COPY_LAST_JS,
         click_continue_js=gpt.CHATGPT_CLICK_CONTINUE_JS,
         last_reply_js=gpt.CHATGPT_LAST_REPLY_JS,
+        poll_clipboard=True,  # the reply is read with its Copy button: its text is no longer in the page
         require_idle=True,
     ),
 }

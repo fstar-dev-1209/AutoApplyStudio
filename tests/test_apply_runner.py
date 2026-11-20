@@ -44,7 +44,7 @@ class Env:
         self.tmp = tmp_path
         self.store = QueueStore(tmp_path / "studio.db")
         self.apps = ApplicationService(self.store.database)
-        self.settings = AppSettings(apply_mode="auto", apply_daily_cap=40,
+        self.settings = AppSettings(apply_mode="auto", apply_daily_cap=40, question_chat="app",
                                     profile=ProfileSettings(name="Mary Ann Berg", work_history="Engineer | PayPal | 2019 - 2024"))
         self.now = T0
         self.calls: list[dict] = []
@@ -280,6 +280,7 @@ def test_the_open_questions_are_asked_in_the_jobs_conversation_and_a_new_one_is_
 
     env.runner._ask_chat = ask_chat
     env.settings.answer_prompt = "Write like a person."
+    env.settings.profile.work_history = ""  # no real history saved: the resume's own conversation is used
     saved = "https://chatgpt.com/c/aaaaaaaa-2222-3333-4444-555555555555"
     job = env.job(1, chat_url=saved)
     env.tick()
@@ -467,3 +468,93 @@ def test_the_same_stop_twice_is_set_aside(env):
     assert env.runner.attempts.needs_you() == []
     env.now += timedelta(days=1)
     assert env.tick() is None  # never picked again
+
+
+
+def test_with_a_real_work_history_the_questions_get_a_fresh_chat_with_the_job_the_resume_and_your_facts(env):
+    @dataclass
+    class Result:
+        answer: str = "Yes"
+        error: str = ""
+        chat_url: str = "https://chatgpt.com/c/99999999-2222-3333-4444-555555555555"
+        raw: str = ""
+
+    def ask_chat(prompt, **kw):
+        env.chat_calls.append({"prompt": prompt, **kw})
+        return Result()
+
+    env.runner._ask_chat = ask_chat
+    env.settings.apply_facts = {"relocation": "Yes"}
+    env.settings.form_questions = [
+        {"label": "Are you willing to relocate to Austin?", "options": ["Yes", "No"], "answer": "Yes"},
+        {"label": "Do you have 5 years of experience with SQL?", "options": ["Yes", "No"], "answer": "Yes"}]
+    resume_chat = "https://chatgpt.com/c/aaaaaaaa-2222-3333-4444-555555555555"
+    job = env.job(1, chat_url=resume_chat)
+    env.tick()
+    answer = env.calls[0]["answer"]
+    assert answer(Question("Do you have 5+ years of Python?", options=["Yes", "No"], kind="choice")) == "Yes"
+    assert answer(Question("Are you willing to travel?", options=["Yes", "No"], kind="choice")) == "Yes"
+    first, second = env.chat_calls
+    assert first["chat_url"] == ""  # a new chat, never the one that wrote the resume
+    context = first["context_prompt"]
+    assert "We need an engineer." in context and "PayPal" in context and "Willing to relocate: Yes" in context
+    assert "relocate to austin" in context and "experience with sql" not in context  # only answers about you
+    assert second["chat_url"] == Result.chat_url  # the rest of the form continues in that new chat
+    assert env.store.get(job.id).chat_url == resume_chat  # the resume's conversation is left as it was
+
+
+def test_the_chat_usage_limit_pauses_applying_and_it_carries_on_by_itself(env):
+    first, second = env.job(1), env.job(2, completed_minutes_ago=5)
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, "The chat could not answer 'Why us?': ChatGPT is showing a usage limit. "
+                                            "This job was not sent on.")]
+    assert env.tick().state == FAILED  # not left waiting for you
+    assert any("usage limit" in t.lower() for t, _ in env.alerts)
+    env.now += timedelta(minutes=10)
+    assert env.tick() is None and "usage limit" in env.runner.status.message
+    env.now += timedelta(hours=1)
+    assert env.tick().state == SUBMITTED  # the pause is over
+
+
+def test_a_chat_that_could_not_be_opened_is_retried_by_itself(env):
+    env.job(1)
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, "The chat could not answer 'City?': Could not open a new ChatGPT "
+                                            "conversation (page at https://chatgpt.com/, document loading).")]
+    assert env.tick().state == FAILED
+
+
+def test_experience_questions_use_the_resume_rules_only_with_a_real_work_history(env):
+    @dataclass
+    class Result:
+        answer: str = "Yes"
+        error: str = ""
+        chat_url: str = ""
+        raw: str = ""
+
+    def ask_chat(prompt, **kw):
+        env.chat_calls.append(prompt)
+        return Result()
+
+    env.runner._ask_chat = ask_chat
+    env.job(1)
+    env.tick()
+    env.calls[0]["answer"](Question("Do you have 5+ years of Python?", options=["Yes", "No"], kind="choice"))
+    assert "HOW TO ANSWER FROM MY RESUME" in env.chat_calls[-1]  # Env saves a work history
+    env.settings.profile.work_history = ""
+    env.job(2, company="Other")
+    env.now += timedelta(minutes=5)
+    env.tick()
+    env.calls[-1]["answer"](Question("Do you have 5+ years of Python?", options=["Yes", "No"], kind="choice"))
+    assert "HOW TO ANSWER FROM MY RESUME" not in env.chat_calls[-1]
+
+
+def test_a_human_check_pauses_applying_with_one_message_and_it_looks_again_later(env):
+    env.job(1)
+    env.job(2, company="Second", completed_minutes_ago=5)
+    env.outcomes = [ApplyOutcome(NEEDS_YOU, "The chat could not answer 'City?': ChatGPT is showing a human-verification "
+                                            "check. Open the ChatGPT tab, complete it once, then retry.")]
+    assert env.tick().state == FAILED
+    assert [t for t, _ in env.alerts] == ["Chat needs you"]
+    env.now += timedelta(minutes=5)
+    assert env.tick() is None  # paused
+    env.now += timedelta(minutes=11)
+    assert env.tick().state == SUBMITTED  # looked again after 15 minutes

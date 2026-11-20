@@ -40,6 +40,8 @@ def make_answer_fn(
     timeout_sec: int = 300,
     facts_text: str = "",
     log: Callable[[str], None] = lambda message: None,
+    fresh: bool = False,
+    from_resume: bool = False,
 ) -> Callable[[Question], str]:
     """A function that answers one form question in the chat that wrote this job's resume.
 
@@ -48,11 +50,17 @@ def make_answer_fn(
     """
     context = build_context_prompt(job_description=job.job_description, resume_json=job.resume_json,
                                    company=job.company, role=job.role_title, facts=facts_text)
-    state = {"url": job.chat_url}
+    # fresh: the questions get a chat of their own, opened with the job, the resume and your facts; the resume's own
+    # conversation is never used (nor replaced as the job's saved conversation).
+    state = {"url": "" if fresh else job.chat_url}
 
     def answer(question: Question) -> str:
-        if facts_text and not question.facts and question.kind != "salary":
-            question = replace(question, facts=facts_text)  # said with every question: an old conversation has not seen them
+        if from_resume and question.kind != "salary" and not question.from_resume:
+            question = replace(question, from_resume=True)
+        if facts_text and not question.facts and question.kind != "salary" and state["url"]:
+            # said again with each question in an existing chat (an old conversation has not seen them); a new chat
+            # gets them once, in its first message, with the job and the resume
+            question = replace(question, facts=facts_text)
         prompt = build_question_prompt(question, style_prompt.strip() or DEFAULT_ANSWER_PROMPT)
         last_error = "no answer"
         for attempt in range(2):
@@ -61,8 +69,9 @@ def make_answer_fn(
                 "markers [[ANSWER_START]] and [[ANSWER_END]].")
             result = ask_chat(prompt + extra, chat_url=state["url"], context_prompt=context, timeout_sec=timeout_sec)
             if result.chat_url and result.chat_url != state["url"]:
-                state["url"] = result.chat_url
-                on_conversation(result.chat_url)  # the conversation to reuse for the next question
+                state["url"] = result.chat_url  # the next question of this form goes to the same chat
+                if not fresh:
+                    on_conversation(result.chat_url)  # the job's conversation, saved for its next form
             if not result.error and result.answer:
                 return result.answer
             last_error = result.error or "empty answer"

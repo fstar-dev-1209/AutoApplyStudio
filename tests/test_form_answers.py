@@ -741,12 +741,12 @@ def test_the_facts_for_the_chat_are_short_and_say_what_answers_questions():
     facts = {"address": "1 Main St", "city": "Austin", "state": "TX", "zip": "78701", "country": "United States",
              "certifications": "None", "other_names": "None", "relocation": "Yes", "notice_period": "Immediately",
              "about_me": "I can travel.", "sms_consent": "Yes", "pronouns": "She/Her", "eeo_race": "Asian"}
-    many = {f"question {n}": "Yes" for n in range(40)}
+    many = {f"are you willing to relocate to city {n}": "Yes" for n in range(40)}
     text = personal_facts_text(PROFILE, facts, many)
     assert "1 Main St, Austin, TX 78701, United States" in text and "my only address" in text
     assert "Certifications: None" in text and "Other names or aliases: None" in text and "I can travel." in text
     assert "She/Her" not in text and "Asian" not in text and "text messages" not in text
-    assert "question 39" in text and "question 27" not in text  # only the latest saved answers
+    assert "city 39" in text and "city 24" not in text  # only the latest saved answers
     assert len(text) < 2500
 
 
@@ -787,3 +787,98 @@ def test_small_gaps_seen_in_real_forms():
     context = text("If applicable, please provide additional context to the previous question.", required=True,
                    kind="textarea")
     assert (decide(context, ctx(chat_enabled=True)).action, decide(context, ctx()).value) == (FILL, "N/A")
+
+
+def test_residing_in_one_of_a_list_of_places_is_a_yes_no_question_and_accommodations_are_a_saved_answer():
+    label = ("Do you reside in any of the following locations (Alaska, Hawaii, Montana, North Dakota, South Dakota, "
+             "New Mexico, Wyoming, American Samoa, Guam, Northern Mariana Islands, Puerto Rico)")
+    assert classify(label) == ""
+    assert classify("Location") == "location"
+    ask = choice("Do you need any assistance or accommodations to take part in the interview process?", ["Yes", "No"])
+    assert classify(ask.label) == "interview_accommodations"
+    assert decide(ask, ctx(facts={"interview_accommodations": "No"})).value == "No"
+    assert classify("Can you perform the essential functions of the job with or without reasonable accommodation?") == "can_perform"
+
+
+def test_only_saved_answers_about_you_are_reused_never_experience_answers():
+    from core.personal_facts import is_personal_question, personal_facts_text
+
+    assert is_personal_question("Are you willing to relocate?") and is_personal_question("What city are you based in?")
+    assert not is_personal_question("Do you possess 5 years of experience querying data in SQL?")
+    assert not is_personal_question("Please select your experience level with React")
+    saved = {"are you willing to relocate": "Yes", "do you possess 5 years of experience in sql": "Yes"}
+    text = personal_facts_text(PROFILE, {}, saved)
+    assert "are you willing to relocate" in text and "sql" not in text
+    sql = choice("Do you possess 5 years of experience in SQL?", ["Yes", "No"])
+    assert decide(sql, ctx(chat_enabled=True, form_answers={"do you possess 5 years of experience in sql": "Yes"})).action == CHAT
+    move = choice("Are you willing to relocate to Boston?", ["Yes", "No"])
+    assert decide(move, ctx(form_answers={"are you willing to relocate to boston": "No"}, facts={"relocation": ""})).value == "No"
+
+
+def test_more_questions_about_you_come_from_your_answers():
+    facts = {"previously_applied": "No", "has_relatives": "No", "referral_source": "Jobright",
+             "preferred_locations": "Remote; anywhere in the US if required", "languages": "English (native)",
+             "employment_type": "Full-time or contract", "assessments_ok": "Yes", "city": "Mount Dora"}
+    c = ctx(facts=facts, chat_enabled=True)
+    yn = ["Yes", "No"]
+    assert decide(choice("Have you applied for another role with Air within the last 6 months?", yn), c).value == "No"
+    assert decide(choice("Have you previously interviewed with Mercer Advisors?", yn), c).value == "No"
+    assert decide(text("Related Employee(s)", required=True), c).value == "None"
+    assert decide(text("Source", required=True), c).value == "Jobright"
+    assert decide(text("Primary Address City", required=True), c).value == "Mount Dora"
+    places = choice("Preferred Location?", ["New York", "Remote", "San Francisco"], kind="checkgroup")
+    assert decide(places, c).value == "Remote"
+    assert decide(choice("Preferred Location?", ["New York", "Boston"]), c).action == CHAT
+    assert decide(text("Which languages do you speak?", required=True), c).value == "English (native)"
+    assert decide(choice("Are you willing to complete a take-home assessment?", yn), c).value == "Yes"
+    assert decide(text("Website", required=True), c).value == "N/A"
+    accept = Field(ref="a", kind="checkbox", label="Accept", required=True)
+    assert decide(accept, ctx()).action == FILL
+
+
+def test_status_availability_and_age_questions_come_from_your_answers():
+    from datetime import date
+
+    facts = {"employment_status": "Not currently employed; available now", "other_positions": "Yes", "shifts_ok": "Yes",
+             "drivers_license": "Yes", "home_office": "Yes", "date_of_birth": "05/26/1993"}
+    c = ctx(facts=facts, today=date(2026, 11, 19), chat_enabled=True)
+    yn = ["Yes", "No"]
+    assert decide(text("Are you currently employed?", required=True), c).value.startswith("Not currently employed")
+    assert decide(choice("Which best describes your current situation?", ["Employed", "Between roles", "Student"]), c).action == CHAT
+    assert decide(choice("Would you like to be considered for other positions now or in the future?", yn), c).value == "Yes"
+    assert decide(choice("Are you able to work weekends and on-call shifts?", yn), c).value == "Yes"
+    assert decide(choice("Do you have a valid driver's license?", yn), c).value == "Yes"
+    assert decide(choice("Do you have a reliable home office and internet connection?", yn), c).value == "Yes"
+    ages = choice("Which age group are you in?", ["18-24", "25-34", "35-44", "45+", "Prefer not to say"])
+    assert decide(ages, c).value == "25-34"  # 33 on 2026-11-19
+    assert decide(choice("Are you 40 years of age or older?", yn), c).value == "No"
+    assert decide(choice("Which age group are you in?", ["Under 40", "40 or older"]), c).value == "Under 40"
+    assert decide(choice("Are you at least 18 years of age?", yn), ctx(facts={"over_18": "Yes"})).value == "Yes"
+    from core.personal_facts import personal_facts_text
+    assert "1993" not in personal_facts_text(PROFILE, facts, {})  # the date of birth never goes to the chat
+
+
+def test_legal_background_and_preference_questions_come_from_your_answers():
+    facts = {"criminal_record": "No", "terminated": "No", "government_employee": "No", "nda_ok": "Yes",
+             "credit_check": "Yes", "middle_name": "Austin", "passport": "Yes", "hours_per_week": "40+",
+             "lower_level_ok": "Yes", "other_offers": "No; I am free now", "transportation": "Yes", "zone_hours_ok": "Yes",
+             "professional_association": "No", "social_profiles": "N/A", "state": "FL"}
+    resume = {"education": [{"school": "University of Florida", "dates": "2011 - 2015"}]}
+    c = ctx(facts=facts, resume=resume, chat_enabled=True)
+    yn = ["Yes", "No"]
+    assert decide(choice("Have you ever been convicted of a felony?", yn), c).value == "No"
+    assert decide(choice("Have you ever been terminated from a position?", yn), c).value == "No"
+    assert decide(choice("Are you a current or former government employee?", yn), c).value == "No"
+    assert decide(choice("Are you willing to sign an NDA and intellectual property agreement?", yn), c).value == "Yes"
+    assert decide(choice("Can you pass a credit check?", yn), c).value == "Yes"
+    assert decide(text("Middle Name", required=True), c).value == "Austin"
+    assert decide(text("Middle Initial", required=True), c).value == "A"
+    assert decide(text("What year did you graduate?", required=True), c).value == "2015"
+    assert decide(choice("Do you hold a current passport?", yn), c).value == "Yes"
+    assert decide(text("Passport Number", required=True), c).action == NEEDS  # never stored, never typed
+    assert decide(text("How many hours per week can you work?", required=True), c).value == "40+"
+    assert decide(choice("Would you consider a lower level role?", yn), c).value == "Yes"
+    assert decide(choice("Do you have reliable transportation?", yn), c).value == "Yes"
+    assert decide(choice("Are you willing to work Pacific time business hours?", yn), c).value == "Yes"
+    assert decide(choice("Are you EST based?", yn), c).value == "Yes"  # where you live, not willingness
+    assert decide(text("Twitter", required=True), c).value == "N/A"

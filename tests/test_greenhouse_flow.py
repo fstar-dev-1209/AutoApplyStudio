@@ -395,3 +395,22 @@ def test_a_chat_answer_about_missing_information_is_asked_again_and_never_typed_
     optional = Field(ref="o", kind="text", label="Anything else?", required=False)
     applier = GreenhouseApplier(answer=lambda q: "I'm not sure", board_api="")
     assert applier._ask(optional, Context(profile=ProfileSettings(), chat_enabled=True)).action == "skip"
+
+
+def test_a_machine_sounding_answer_is_asked_for_again_in_plain_words():
+    from core.form_answers import Context, Field
+    from core.greenhouse import GreenhouseApplier
+    from core.settings_store import ProfileSettings
+
+    asked = []
+
+    def answer(q):
+        asked.append(q)
+        return ("I'm passionate about leveraging robust systems." if len(asked) == 1
+                else "I built the billing service at Acme and cut failed payments by half.")
+
+    applier = GreenhouseApplier(answer=answer, board_api="")
+    field = Field(ref="w", kind="textarea", label="Why do you want this role?", required=True)
+    d = applier._ask(field, Context(profile=ProfileSettings(), chat_enabled=True))
+    assert d.value == "I built the billing service at Acme and cut failed payments by half."
+    assert "passionate" in asked[1].hint

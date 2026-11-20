@@ -85,7 +85,11 @@ def find_browser(channel: str, explicit: str = "") -> str:
 
 def browser_args(config: BrowserConfig) -> list[str]:
     """Command-line switches for the browser. None of them hide automation; they keep the session consistent."""
-    args = [f"--lang={config.locale}", "--no-first-run", "--no-default-browser-check"]
+    args = [f"--lang={config.locale}", "--no-first-run", "--no-default-browser-check",
+            # Keep every page drawing and running at full speed when the window is covered, minimized, or nobody is
+            # signed in to the server's screen: a ChatGPT reply is only shown on a page that draws.
+            "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion"]
     if config.proxy:
         args.append(f"--proxy-server={config.proxy}")
         # without this Chrome can reveal the computer's real address through WebRTC even behind a proxy

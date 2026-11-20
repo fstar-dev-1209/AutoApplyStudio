@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import threading
@@ -75,6 +76,17 @@ NAV = [
     ("json", "Manual JSON", "json"),
     ("settings", "Settings", "settings"),
 ]
+
+
+def _end_process() -> None:
+    """End this process at once. On Windows the process is terminated outright, so no library tears itself down while
+    a worker thread is still inside it (that teardown left a crash report on every close)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 0)
+    os._exit(0)
 
 
 class MainWindow(QMainWindow):
@@ -354,6 +366,8 @@ class MainWindow(QMainWindow):
             self.claude_view = ClaudeChatView(
                 site_key=self.settings_store.settings.chat_provider,
                 proxy_credentials=self.settings_store.proxy_credentials,
+                # questions asked in the bot browser: the app's questions pane is not needed (see core.chrome_chat)
+                questions_pane=self.settings_store.settings.question_chat == "app",
             )
             self.stack.addWidget(self.claude_view)
 
@@ -1200,7 +1214,7 @@ class MainWindow(QMainWindow):
         args = {"deliver": deliver, "prompt": question_prompt, "chat_url": chat_url,
                 "context": context_prompt, "timeout": timeout_sec}
         deadline = time.monotonic() + wait_for_page_sec
-        while not self._call_on_ui(self._start_ask, args, wait=120):
+        while not self._call_on_ui(self._start_ask, args, wait=240):
             if time.monotonic() >= deadline:
                 return AskResult(error="The chat page stayed busy; the question was not asked.")
             time.sleep(3)
@@ -1535,6 +1549,24 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(C.STATUS_BATCH_DONE, 5000)
                 self.files_view.refresh()
 
+    # Set by app_main for the real app: closing ends the process at once (see _exit_now). Tests leave it off.
+    exit_hard = False
+    on_exit = None  # called just before the process ends (app_main marks the heartbeat as closed)
+
+    def _exit_now(self) -> None:
+        """End the app without waiting for its worker threads. A thread in the middle of a form question waits for this
+        window, so waiting for it here froze the window until Windows closed it. Nothing is lost: the database is
+        crash-safe, an application cut off is recorded as interrupted at the next start, and a resume being written is
+        generated again."""
+        for stop in (lambda: self.bot.apply.kill() if self.bot is not None else None,
+                     lambda: self.engine.stop(), lambda: self.queue_store.database.close(),
+                     lambda: self.on_exit() if callable(self.on_exit) else None):
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - closing must always finish
+                pass
+        _end_process()
+
     def closeEvent(self, event) -> None:  # noqa: N802
         # A close from the window itself (its X button, Alt+F4) asks first: closing stops resume generation, job search
         # and applying until the app is started again. A close made by the app or a test (close()) does not ask.
@@ -1545,6 +1577,9 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._closing = True  # stop UI refreshes first; background threads may still emit while they wind down
+        if self.exit_hard:
+            self._exit_now()
+            return
         if self.is_viewer:
             self.viewer.stop()
         else:

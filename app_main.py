@@ -141,8 +141,15 @@ def main() -> int:
     window.show()
     _watch_for_freezes(app)
     mark_closed = _heartbeat_and_watchdog(app)
+    window.exit_hard = True  # closing ends the process at once, never waiting for a worker thread (see MainWindow)
+    window.on_exit = mark_closed
     code = app.exec()
     mark_closed()  # closed from the window: the watchdog reports a close, not a crash
+    # End here, without the interpreter's own shutdown: tearing Qt down while worker threads still run left a crash
+    # report on every close.
+    from ui.main_window import _end_process
+
+    _end_process()
     return code
 
 

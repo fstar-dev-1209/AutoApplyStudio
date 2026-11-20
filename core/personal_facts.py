@@ -12,10 +12,34 @@ Nothing here sends anything, and secrets (passwords, tokens) are never in it.
 
 from __future__ import annotations
 
+import re
+
 from core.apply_facts import DECLINE, FACTS
 from core.settings_store import ProfileSettings
 
-MAX_SAVED_ANSWERS = 12  # the most recent ones
+MAX_SAVED_ANSWERS = 15  # the most recent ones
+
+# A saved answer is reused only when the question is about you as a person: where you live and can work, when you can
+# start, travel, hours, checks, your status. A question about experience or skills ("5+ years of SQL?", "your level
+# with React") is answered for each job from that job's resume, never copied from another form.
+_PERSONAL = re.compile(
+    r"relocat|\bstart\b|availab|notice period|travel|address|\bcity\b|\bstate\b|country|\breside|\blived?\b|\blocated\b|"
+    r"located in|authori[sz]|eligib|sponsor|visa|citizen|green card|permanent resident|clearance|background check|"
+    r"drug (test|screen)|\b18\b|years of age|relative|previously (been )?employed|worked (for|at) .{0,40} before|"
+    r"former employee|non-?compete|restrictive covenant|hours|shift|weekend|on-?site|hybrid|remote|in[- ]office|"
+    r"commut|contract(or)?\b|w-?2|1099|full[- ]time|part[- ]time|time ?zone|\best\b|\bpst\b|"
+    r"office|work location|where would you|hear about|referr|linkedin|pronoun|name|phone|e-?mail|accommodation|references|consider(ed)? for other",
+    re.I)
+_EXPERIENCE = re.compile(
+    r"experience|years? of|skill|proficien|familiar|expert|level (with|in)|rate yourself|scale (of|from)|hands-?on|"
+    r"built|used|worked with|knowledge|certif|degree|portfolio|github|tell us|describe|explain|why\b",
+    re.I)
+
+
+def is_personal_question(question: str) -> bool:
+    """True for a question about you as a person (see _PERSONAL); False for one about experience or skills."""
+    text = question or ""
+    return bool(_PERSONAL.search(text)) and not _EXPERIENCE.search(text)
 MAX_ANSWER_CHARS = 100
 
 # Saved answers worth telling the chat, in this order (label, key). The address, the name and the education are
@@ -33,7 +57,31 @@ _FACT_LINES = (
     ("Willing to take a drug test", "drug_test"),
     ("At least 18 years old", "over_18"),
     ("Can perform the essential functions of the job", "can_perform"),
+    ("Need accommodations for interviews", "interview_accommodations"),
     ("Worked for this company before", "previously_employed"),
+    ("Applied to or interviewed with this company before", "previously_applied"),
+    ("Preferred work locations", "preferred_locations"),
+    ("Employment types I accept", "employment_type"),
+    ("Willing to complete assessments", "assessments_ok"),
+    ("Languages", "languages"),
+    ("How I found this job", "referral_source"),
+    ("Current employment status", "employment_status"),
+    ("Consider me for other positions", "other_positions"),
+    ("Can work shifts, weekends or on-call", "shifts_ok"),
+    ("Valid driver's license", "drivers_license"),
+    ("Reliable home office and internet", "home_office"),
+    ("Ever convicted of a crime", "criminal_record"),
+    ("Ever terminated or asked to resign", "terminated"),
+    ("Current or former government employee", "government_employee"),
+    ("Willing to sign an NDA / IP agreement", "nda_ok"),
+    ("Can pass a credit check", "credit_check"),
+    ("Hold a current passport", "passport"),
+    ("Hours per week I can work", "hours_per_week"),
+    ("Would consider a lower level or title", "lower_level_ok"),
+    ("Other offers or interviews", "other_offers"),
+    ("Reliable transportation", "transportation"),
+    ("Can work any US time zone's business hours", "zone_hours_ok"),
+    ("Member of a professional association", "professional_association"),
     ("Relatives who work at this company", "has_relatives"),
     ("Bound by a non-compete or similar agreement", "non_compete"),
     ("GPA", "gpa"),
@@ -87,7 +135,7 @@ def personal_facts_text(profile: ProfileSettings, facts: dict[str, str], form_an
     saved = []
     for key, answer in (form_answers or {}).items():
         answer = " ".join(str(answer or "").split())
-        if key and answer:
+        if key and answer and is_personal_question(key):
             saved.append(_line(f"\"{key[:90]}\"", answer[:MAX_ANSWER_CHARS]))
     if saved:
         lines.append("")
@@ -101,4 +149,4 @@ def facts_for(ctx) -> str:
     return personal_facts_text(ctx.profile, ctx.facts or {}, ctx.form_answers or {}, today_text=ctx.today.strftime("%B %d, %Y"))
 
 
-__all__ = ["facts_for", "full_address", "personal_facts_text"]
+__all__ = ["facts_for", "full_address", "is_personal_question", "personal_facts_text"]

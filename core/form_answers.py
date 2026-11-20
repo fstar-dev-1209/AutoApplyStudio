@@ -15,6 +15,7 @@ from datetime import date
 from core.apply_facts import DECLINE, norm_question
 from core.apply_kit import split_name
 from core.chat_questions import match_option
+from core.personal_facts import is_personal_question
 from core.settings_store import ProfileSettings
 
 FILL, CHAT, SKIP, NEEDS = "fill", "chat", "skip", "needs"
@@ -104,9 +105,32 @@ RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in
     ("state", r"^(current |home |what )?state\b|what state|state are you|province|region"),
     ("country", r"^(current |home )?country\b|country of residence|country where you (currently )?(live|reside)|"
                  r"countries you anticipate working"),
-    ("city", r"^city\b"),
+    ("city", r"^(current |home |primary )?city\b|address city|city of residence"),
     ("located_in_us", r"currently located in the (united states|u\.?s\.?a?\.?)|"
                       r"do you (currently )?(live|reside) in the (united states|u\.?s\.?)"),
+    ("criminal_record", r"convicted|felony|felonies|criminal (record|conviction|offen[cs]es?|history)|pleaded guilty"),
+    ("terminated", r"(ever )?been (terminated|fired|dismissed|let go|asked to resign)|terminated from (a|any) (job|position)"),
+    ("government_employee", r"(current|former) (u\.?s\.? )?(government|federal|state|public[- ]sector) employee|"
+                            r"(worked|employed) (for|by) (the )?(u\.?s\.? |federal |state )?government|government employ"),
+    ("nda_ok", r"(willing|able|agree|prepared) to sign\b.{0,60}\b(nda|non-?disclosure|confidentiality|intellectual "
+               r"property|invention|ip)\b"),
+    ("credit_check", r"credit (check|history|report)"),
+    ("middle_name", r"middle (name|initial)"),
+    ("graduation_year", r"graduat(ion|ed)\b.{0,20}\b(year|date)|year (of|you|did you) graduat|when did you graduate|"
+                        r"year of (completion|degree)"),
+    ("passport", r"\b(hold|have|own)\b.{0,20}\bpassport\b|passport (holder|valid)"),
+    ("hours_per_week", r"hours (per|a|each) week|weekly hours|how many hours"),
+    ("lower_level_ok", r"(lower|different|more junior|junior) (level|title|position|role|seniority)|"
+                       r"level (lower|below)|title (lower|below)"),
+    ("other_offers", r"(other|competing|outstanding|pending) (job )?offers|interviewing (with|at|elsewhere)|"
+                     r"other (interviews|processes)|your (hiring |job search )?timeline"),
+    ("transportation", r"reliable (transportation|transport|means of (transportation|travel))|access to (a )?(car|vehicle)|"
+                       r"own (a )?(car|vehicle)"),
+    ("zone_hours_ok", r"(willing|able|comfortable|open)\b.{0,60}\b(hours|time ?zones?)\b|overlap\b.{0,40}\bhours|"
+                      r"work(ing)? (during|in) .{0,30}\b(time|business hours)"),
+    ("professional_association", r"professional (association|organi[sz]ation|society|body)|member of (any )?"
+                                 r"(professional|industry) (association|organi[sz]ation|group)"),
+    ("social_profiles", r"twitter|\bx\.com\b|\bx handle\b|social media (profile|handle|account)|instagram|facebook"),
     ("non_compete", r"non-?compete|non-?solicitation|employment agreements? or restrictions|"
                     r"limits the companies, industries, or locations|agreement with a current or past employer"),
     ("location", r"location|where are you (based|located)|current city|city.*state"),
@@ -117,6 +141,7 @@ RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in
                           r"work authorization process|require.*visa|visa.*(sponsor|require)"),
     ("work_authorization", r"authori[sz]ed to work|authori[sz]ation to work|evidence of (your )?(identity|eligibility)|proof of (your )?(identity|eligibility|work authori[sz]ation)|eligible to work|legally (permitted|allowed|entitled)|right to work|work authori[sz]ation"),
     ("can_perform", r"essential functions"),
+    ("interview_accommodations", r"(need|require)\b.{0,40}\baccommodations?\b|accommodations?\b.{0,30}\binterview"),
     ("visa_status", r"visa status|work status|immigration status|employment eligibility"),
     ("security_clearance", r"clearance"),
     ("background_check", r"background (check|screen|investigation)"),
@@ -140,11 +165,34 @@ RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in
     ("current_title", r"\b(?:current|most recent|previous)\b(?: or \b(?:current|previous|former)\b)? \b(?:job )?(?:title|role|position)\b"),
     ("school", r"^(school|university|college)\b|^(name of )?(school|university)|institution"),
     ("degree", r"^degree\b|highest (level of )?(education|degree)|level of education"),
+    ("previously_applied", r"\b(have|did) you\b.{0,30}\b(applied|interviewed)\b|previously (applied|interviewed)|"
+                           r"interviewed (with|at|for)\b"),
     ("previously_employed", r"(previously|ever|formerly) (been )?(employed|worked)|former employee|"
                             r"worked (for|at|with) .* (before|past|previously)|worked for .{0,80} previously|"
                             r"applied (to|with|at|for) .{0,80}(past|before|previously)"),
+    ("relatives_names", r"related employees?|relatives?'? names?|names? of (your |any )?(relatives?|related)|"
+                        r"who (is|are) (your|the) relatives?"),
     ("has_relatives", r"\brelatives?\b(?!\s+to\b)|family member|\brelated to\b"),
-    ("referral_source", r"how did you (first )?(hear|find|learn)|where did you (hear|find)|referral source|source of application"),
+    ("referral_source", r"how did you (first )?(hear|find|learn|come across)|where did you (first )?(hear|find|see|learn)|"
+                        r"referral source|source of application|^\s*source\s*\*?:?\s*$"),
+    ("preferred_location", r"preferred (work )?locations?|location preferences?|where would you (like|prefer) to work|"
+                           r"which (of (our|the following|these) )?(offices?|locations?) (would|do|are|can)"),
+    ("languages", r"languages? (do )?you speak|which languages|language proficiency|languages? spoken"),
+    ("employment_type", r"(type|kind)s? of employment|employment type|full[- ]time,? (or )?(part[- ]time|contract)|"
+                        r"(seeking|looking for) (full|part|contract)"),
+    ("employment_status", r"currently employed\??\s*$|are you currently (employed|working)\b(?!.{0,15}\b(by|with|at|for)\b)|"
+                          r"current (employment|work) (situation|status)|best describes your current (situation|status|"
+                          r"employment)|employment status"),
+    ("other_positions", r"consider(ed)? for other (positions|roles|opportunities|openings)|other (positions|roles) "
+                        r"(that|which) (may|might|could)"),
+    ("shifts_ok", r"(willing|able|available|comfortable|open)\b.{0,60}\b(shifts?|weekends?|on-?call|evenings?|overtime|"
+                  r"after[- ]hours|nights?)\b"),
+    ("drivers_license", r"driver'?s'? licen[cs]e|driving licen[cs]e"),
+    ("home_office", r"home office|internet (connection|access)|reliable internet|work(space| from home) (set ?up|environment)"),
+    ("date_of_birth", r"date of birth|birth ?date|\bdob\b"),
+    ("age_group", r"age (group|range|bracket)|which age|how old are you|\byour age\b|(\d{2})( years)?( of age)? or (older|over)"),
+    ("assessments_ok", r"(willing|able|open) to (complete|take|do)\b.{0,40}\b(assessment|test|exercise|take[- ]home|"
+                       r"challenge)"),
     ("pronouns", r"pronoun"),
     ("sms_consent", r"\bsms\b|text message|whatsapp|receive (texts|messages)|text (you|me|us)\b"),
     ("eeo_hispanic", r"hispanic|latino|latinx"),
@@ -156,7 +204,8 @@ RULES: list[tuple[str, re.Pattern[str]]] = [(k, re.compile(p, re.I)) for k, p in
     ("eeo_veteran", r"veteran|military"),
     ("eeo_disability", r"disabilit"),
     ("eeo_orientation", r"sexual orientation|lgbt"),
-    ("agree_consents", r"acknowledge|i agree|agree to|consent|privacy|terms|certify|confirm that|i understand|i have read"),
+    ("agree_consents", r"acknowledge|i agree|agree to|consent|privacy|terms|certify|confirm that|i understand|i have read|"
+                       r"^\s*(yes,?\s+)?(i\s+)?accept\b"),
 ]]
 
 _DECLINE_OPTION = re.compile(
@@ -186,6 +235,10 @@ def classify(label: str) -> str:
             return "ambiguous"
         if key == "has_relatives" and _CONSENT_NOTICE.search(text) and not re.search(r"\brelatives?\b|family member", text, re.I):
             continue  # "...your data for purposes related to recruitment" is a consent notice, not a question about relatives
+        if key in {"location", "city", "state", "country"} and re.search(r"\b(any|one) of the following\b", text, re.I):
+            continue  # "Do you reside in any of the following locations (Alaska, ...)?" is a yes/no question
+        if key == "location" and re.search(r"preferred|preference|would you (like|prefer)", text, re.I):
+            continue  # "Preferred Location?" asks where you would work, not where you live
         if key == "country" and re.search(r"authori[sz]|eligible|right to work", text, re.I):
             continue  # "Your authorization to work in the country where you live" asks about authorization
         if key == "years_experience" and _SKILL_QUALIFIER.search(text):
@@ -550,8 +603,22 @@ def _decide(f: Field, ctx: Context) -> Decision:
         if ctx.chat_enabled and f.options:
             return Decision(CHAT, source="chat")  # two things in one question: the chat picks what is true for both
         return _unanswerable(f, f"Asks two things at once: {label}")
+    if key == "age_group":
+        return _age_decision(f, ctx)
+    if key == "middle_name" and re.search(r"initial", label, re.I) and (ctx.facts.get("middle_name") or "").strip():
+        return Decision(FILL, ctx.facts["middle_name"].strip()[0].upper(), "facts")
+    if key == "passport" and re.search(r"\bnumber\b|expir|issued", label, re.I):
+        return _unanswerable(f, f"Passport details are not stored: {label}")
+    if key == "employment_status" and f.options:
+        # Lists word this many ways ("Employed", "Between roles", "Open to work"), and matching words is dangerous here:
+        # "Not currently employed" contains "employed". The chat picks the option from your facts.
+        if ctx.chat_enabled:
+            return Decision(CHAT, source="chat")
+        return _unanswerable(f, f"Not covered by your facts: {label}")
     if key == "time_zone":
         return _time_zone_decision(f, ctx)
+    if key == "preferred_location":
+        return _preferred_location(f, ctx)
     if key == "salary_expectation" and ctx.pay is not None:
         return Decision(CHAT, source="salary")  # one figure for the job, inside its posted range (core.salary_answer)
     if key == "years_experience" and ctx.chat_enabled and (f.options or f.kind in {"text", "textarea", "number"}):
@@ -565,6 +632,8 @@ def _decide(f: Field, ctx: Context) -> Decision:
         if key.startswith("history_") and answer and f.is_choice:
             option = choose_option(answer, f.options, key)
             return Decision(FILL, option.label, "profile") if option else _unanswerable(f, f"No option matches '{answer}' for: {label}")
+        if not answer and key in {"website_url", "github_url"} and f.required and f.kind in {"text", "textarea"}:
+            answer = "N/A"  # you have none; a required box says so rather than stopping the application
         if not answer:
             return _unanswerable(f, f"Not filled in under Auto Apply > Your answers: {label}")
         if key == "agree_consents" and answer == "No":
@@ -642,6 +711,14 @@ _PROFILE_KEYS = {"first_name", "last_name", "full_name", "email", "phone", "link
 
 
 def _stated(key: str, ctx: Context) -> str:
+    if key == "graduation_year":
+        return _graduation_year(ctx)
+    if key == "middle_name" and ctx.facts.get("middle_name"):
+        return ctx.facts["middle_name"]
+    if key == "relatives_names":  # "Related Employee(s)": none, when no relative works there
+        return "None" if (ctx.facts.get("has_relatives") or "No") == "No" else ""
+    if key == "previously_applied":
+        return ctx.facts.get("previously_applied") or ctx.facts.get("previously_employed") or ""
     if key == "can_perform":
         return ctx.facts.get("can_perform") or "Yes"  # applying says you can do the job, with or without an accommodation
     if key == "work_setup":
@@ -719,9 +796,10 @@ def _manual_answer(f: Field, ctx: Context) -> Decision | None:
 
 
 def _saved_form_answer(f: Field, ctx: Context) -> Decision | None:
-    """An option you already picked for this exact question, on Your answers."""
+    """An option you already picked for this exact question, on Your answers. Only for a question about you as a person:
+    one about experience or skills is answered from this job's resume, not copied from another form."""
     answer = (ctx.form_answers or {}).get(norm_question(f.label), "")
-    if not answer or not f.options:
+    if not answer or not f.options or not is_personal_question(f.label):
         return None
     exact = next((o for o in f.options if o.label.strip() == answer.strip()), None)
     if exact is None:
@@ -756,6 +834,74 @@ def _none_of_the_above(f: Field, ctx: Context) -> Decision | None:
 
 
 _ACK_OPTION = re.compile(r"\b(i )?(acknowledge|understand|have read|received this notice|confirm i have read)\b", re.I)
+
+
+def _graduation_year(ctx: Context) -> str:
+    """The year the degree was completed, as the resume for this job gives it ("2015", "2011 - 2015")."""
+    for entry in (ctx.resume or {}).get("education") or []:
+        if isinstance(entry, dict):
+            years = re.findall(r"\b(19[6-9]\d|20\d\d)\b", str(entry.get("dates") or entry.get("year") or ""))
+            if years:
+                return years[-1]
+    years = re.findall(r"\b(19[6-9]\d|20\d\d)\b", ctx.profile.education_dates or "")
+    return years[-1] if years else ""
+
+
+def _age(ctx: Context) -> int | None:
+    m = re.match(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$", ctx.facts.get("date_of_birth") or "")
+    if not m:
+        return None
+    month, day, year = (int(x) for x in m.groups())
+    today = ctx.today
+    return today.year - year - ((today.month, today.day) < (month, day))
+
+
+def _age_decision(f: Field, ctx: Context) -> Decision:
+    """"Which age group are you in?" / "Are you 40 or older?": from your date of birth; 'prefer not to say' when it is
+    offered and nothing else fits."""
+    age = _age(ctx)
+    label = f.label.strip()
+    if age is None:
+        return _unanswerable(f, f"Not filled in under Auto Apply > Your answers: {label}")
+    threshold = re.search(r"(\d{2})( years)?( of age)? or (older|over)", label, re.I)
+    if threshold and (not f.options or {o.label.strip().lower() for o in f.options} >= {"yes", "no"}):
+        answer = "Yes" if age >= int(threshold.group(1)) else "No"
+        option = choose_option(answer, f.options) if f.options else None
+        return Decision(FILL, option.label if option else answer, "facts")
+    if not f.options:
+        return Decision(FILL, str(age), "facts")
+    for o in f.options:
+        text = o.label.lower()
+        nums = [int(n) for n in re.findall(r"\d{2}", text)]
+        if len(nums) >= 2 and min(nums[:2]) <= age <= max(nums[:2]):
+            return Decision(FILL, o.label, "facts")
+        if len(nums) == 1 and re.search(r"under|less than|below|younger", text) and age < nums[0]:
+            return Decision(FILL, o.label, "facts")
+        if len(nums) == 1 and re.search(r"\+|over|older|above|or more", text) and age >= nums[0]:
+            return Decision(FILL, o.label, "facts")
+    decline = next((o for o in f.options if _DECLINE_OPTION.search(_plain(o.label))), None)
+    if decline is not None:
+        return Decision(FILL, decline.label, "facts")
+    return _unanswerable(f, f"No option matches your age for: {label}")
+
+
+def _preferred_location(f: Field, ctx: Context) -> Decision:
+    """Where you would work: the remote choice when the list has one; otherwise the chat picks from your facts."""
+    wanted = (ctx.facts.get("preferred_locations") or "").strip()
+    if f.options:
+        saved = _saved_form_answer(f, ctx)  # a choice you already made for this exact question comes first
+        if saved:
+            return saved
+        remote = [o for o in f.options if re.search(r"\bremote\b", o.label, re.I)
+                  and not re.search(r"\b(not|non|no)\b[ -]*remote", o.label, re.I)]
+        if remote and re.search(r"remote", wanted, re.I):
+            return Decision(FILL, remote[0].label, "facts")
+        if ctx.chat_enabled:
+            return Decision(CHAT, source="chat")
+        return _unanswerable(f, f"Not covered by your facts: {f.label.strip()}")
+    if wanted:
+        return Decision(FILL, wanted, "facts")
+    return _unanswerable(f, f"Not filled in under Auto Apply > Your answers: {f.label.strip()}")
 
 
 def _acknowledge_notice(f: Field, ctx: Context) -> Option | None:

@@ -221,8 +221,9 @@ def test_not_signed_in_is_reported(fake):
     assert result.error and "sign" in result.error.lower()
 
 
-def test_only_sites_where_it_works_unfocused_use_the_copy_button_while_waiting():
-    assert SITES[CLAUDE].poll_clipboard is True and SITES[CHATGPT].poll_clipboard is False
+def test_both_sites_read_the_reply_with_its_copy_button_while_waiting():
+    # ChatGPT no longer puts a reply's text into the page: its Copy button is how the reply is read
+    assert SITES[CLAUDE].poll_clipboard is True and SITES[CHATGPT].poll_clipboard is True
     assert SITES[CLAUDE].require_idle and SITES[CHATGPT].require_idle
 
 

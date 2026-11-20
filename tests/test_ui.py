@@ -49,7 +49,7 @@ class _Service:
 class StubChatView(QWidget):
     session_cleared = Signal()
 
-    def __init__(self, parent=None, site_key="claude", proxy_credentials=None):
+    def __init__(self, parent=None, site_key="claude", proxy_credentials=None, questions_pane=True):
         super().__init__(parent)
         self.browser = _Browser()
 
@@ -861,3 +861,22 @@ def test_closing_from_the_window_asks_first_and_a_no_keeps_it_open(window, monke
     event = Close(spontaneous=True)
     window.closeEvent(event)
     assert asked == ["Close Auto Apply Studio?"] and event.ignored and not getattr(window, "_closing", False)
+
+
+def test_closing_the_real_app_ends_it_at_once_without_waiting_for_worker_threads(window, monkeypatch):
+    import ui.main_window as mw
+
+    class Close:
+        def spontaneous(self):
+            return True
+
+        def ignore(self):
+            raise AssertionError("closing was refused")
+
+    ended, marked = [], []
+    monkeypatch.setattr(mw, "ask_yes_no", lambda *a, **k: True)
+    monkeypatch.setattr(mw, "_end_process", lambda: ended.append(0))
+    window.exit_hard, window.on_exit = True, lambda: marked.append(True)
+    window.closeEvent(Close())
+    assert ended == [0] and marked == [True]
+    window.exit_hard = False

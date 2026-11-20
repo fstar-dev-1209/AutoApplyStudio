@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from core.chat_questions import NO_ANSWER, Question, answer_problem, clean_answer, match_option
+from core.chat_questions import NO_ANSWER, Question, ai_tells, answer_problem, clean_answer, match_option
 from core.salary_answer import figure_in, pick_bucket
 from core.salary_answer import render as render_salary
 from core.form_answers import CHAT, FILL, NEEDS, OPTIONAL_REASON, SKIP, Context, Decision, Field, decide
@@ -320,6 +320,17 @@ class GreenhouseApplier:
         if problem:
             # Never typed in: an optional question is left blank, a required one waits for you.
             return Decision(NEEDS if f.required else SKIP, reason=f"No usable answer from the chat ({problem}): {f.label}")
+        tells = ai_tells(text) if not choices and question.kind == "text" else []
+        if tells:
+            # Machine-sounding words: asked once to say it plainly. The plainer of the two answers is used.
+            retry = replace(question, hint=(f"Say the same thing in plain words, the way I would type it. Do not use: "
+                                            f"{', '.join(tells)}."))
+            try:
+                second = clean_answer(self.answer(retry), f.max_chars)
+            except Exception:  # noqa: BLE001 - the first answer stands
+                second = ""
+            if second and not answer_problem(second) and len(ai_tells(second)) < len(tells):
+                text = second
         if choices:  # the answer must be one of the form's own options, word for word
             picked = match_option(text, choices) or match_option(str(raw), choices)
             if not picked:

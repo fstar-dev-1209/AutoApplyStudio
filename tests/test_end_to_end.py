@@ -40,6 +40,7 @@ def test_a_job_found_on_jobright_ends_up_applied_to_and_recorded(tmp_path):
     store = QueueStore(tmp_path / "studio.db")
     apps = ApplicationService(store.database)
     settings = AppSettings(
+        question_chat="app",
         apply_mode="auto", discovery_enabled=True,
         profile=ProfileSettings(name="Mary Ann van der Berg", email="mary@example.com", phone="(555) 010-0000",
                                 work_history="Engineer | PayPal | 2019 - 2024",

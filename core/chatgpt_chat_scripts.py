@@ -20,7 +20,11 @@ _COMMON = (
   const COMPOSER = """
     + _COMPOSER
     + r""";
-  function composerEl() { return document.querySelector(COMPOSER); }
+  // A conversation page can hold a hidden editor before the real one: the visible one is the message box.
+  function composerEl() {
+    const all = Array.from(document.querySelectorAll(COMPOSER));
+    return all.find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }) || all[0] || null;
+  }
   function composerText(c) {
     if (!c) return '';
     return (c.value !== undefined && c.tagName === 'TEXTAREA') ? c.value : (c.innerText || c.textContent || '');
@@ -321,6 +325,13 @@ CHATGPT_CLICK_COPY_LAST_JS = (
 """
     + _COMMON
     + r"""
+  // The Copy button under the last reply ("Copy message" is the one under your own message). ChatGPT no longer puts
+  // the text of a reply into the page, so this button is how the reply is read.
+  const replyCopies = Array.from(document.querySelectorAll('main button[aria-label="Copy"]'));
+  if (replyCopies.length) {
+    replyCopies[replyCopies.length - 1].click();
+    return JSON.stringify({ ok: true });
+  }
   const els = assistantEls();
   const last = els.length ? els[els.length - 1] : null;
   const scope = (last && (last.closest('article') || last.parentElement)) || document;
