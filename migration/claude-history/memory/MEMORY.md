@@ -1,0 +1,2 @@
+- [Freshness policy and two chat pages](freshness-and-two-chat-pages.md) — hourly freshest-first batch (cap 20), stale jobs expired, separate chat pages for resumes vs form questions
+- [Optional questions and Telegram reports](optional-questions-and-telegram-reports.md) — skip all non-required questions; Telegram reports; per-application Q&A record
