@@ -12,3 +12,6 @@ _read_*.py
 *.db-wal
 *.db-shm
 credentials.dat
+
+# moving data between computers: never in the repository
+migration/
